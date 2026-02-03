@@ -87,44 +87,50 @@ class TestEmbedderConfiguration:
     def test_config_loading(self):
         """Test that all embedder configurations load properly."""
         from api.config import configs, CLIENT_CLASSES
-        
+
         # Check all embedder configurations exist
         assert 'embedder' in configs, "OpenAI embedder config missing"
         assert 'embedder_google' in configs, "Google embedder config missing"
         assert 'embedder_ollama' in configs, "Ollama embedder config missing"
         assert 'embedder_bedrock' in configs, "Bedrock embedder config missing"
-        
+        assert 'embedder_dashscope' in configs, "Dashscope embedder config missing"
+
         # Check client classes are available
         assert 'OpenAIClient' in CLIENT_CLASSES, "OpenAIClient missing from CLIENT_CLASSES"
         assert 'GoogleEmbedderClient' in CLIENT_CLASSES, "GoogleEmbedderClient missing from CLIENT_CLASSES"
         assert 'OllamaClient' in CLIENT_CLASSES, "OllamaClient missing from CLIENT_CLASSES"
         assert 'BedrockClient' in CLIENT_CLASSES, "BedrockClient missing from CLIENT_CLASSES"
+        assert 'DashscopeClient' in CLIENT_CLASSES, "DashscopeClient missing from CLIENT_CLASSES"
     
     def test_embedder_type_detection(self):
         """Test embedder type detection functions."""
-        from api.config import get_embedder_type, is_ollama_embedder, is_google_embedder, is_bedrock_embedder
-        
+        from api.config import get_embedder_type, is_ollama_embedder, is_google_embedder, is_bedrock_embedder, is_dashscope_embedder
+
         # Default type should be detected
         current_type = get_embedder_type()
-        assert current_type in ['openai', 'google', 'ollama', 'bedrock'], f"Invalid embedder type: {current_type}"
-        
+        assert current_type in ['openai', 'google', 'ollama', 'bedrock', 'dashscope'], f"Invalid embedder type: {current_type}"
+
         # Boolean functions should work
         is_ollama = is_ollama_embedder()
         is_google = is_google_embedder()
         is_bedrock = is_bedrock_embedder()
+        is_dashscope = is_dashscope_embedder()
         assert isinstance(is_ollama, bool), "is_ollama_embedder should return boolean"
         assert isinstance(is_google, bool), "is_google_embedder should return boolean"
         assert isinstance(is_bedrock, bool), "is_bedrock_embedder should return boolean"
-        
+        assert isinstance(is_dashscope, bool), "is_dashscope_embedder should return boolean"
+
         # Only one should be true at a time (unless using openai default)
         if current_type == 'bedrock':
-            assert is_bedrock and not is_ollama and not is_google
+            assert is_bedrock and not is_ollama and not is_google and not is_dashscope
         elif current_type == 'ollama':
-            assert is_ollama and not is_google and not is_bedrock
+            assert is_ollama and not is_google and not is_bedrock and not is_dashscope
         elif current_type == 'google':
-            assert is_google and not is_ollama and not is_bedrock
+            assert is_google and not is_ollama and not is_bedrock and not is_dashscope
+        elif current_type == 'dashscope':
+            assert is_dashscope and not is_ollama and not is_google and not is_bedrock
         else:  # openai
-            assert not is_ollama and not is_google and not is_bedrock
+            assert not is_ollama and not is_google and not is_bedrock and not is_dashscope
 
     def test_get_embedder_config(self, embedder_type=None):
         """Test getting embedder config for each type."""
@@ -172,6 +178,13 @@ class TestEmbedderFactory:
             assert ollama_embedder is not None, "Ollama embedder should be created"
         except Exception as e:
             logger.warning(f"Ollama embedder creation failed (expected if Ollama not available): {e}")
+
+        # Test Dashscope embedder (may fail if API key not available, but should not crash)
+        try:
+            dashscope_embedder = get_embedder(embedder_type='dashscope')
+            assert dashscope_embedder is not None, "Dashscope embedder should be created"
+        except Exception as e:
+            logger.warning(f"Dashscope embedder creation failed (expected if DASHSCOPE_API_KEY not available): {e}")
 
     def test_get_embedder_with_legacy_params(self):
         """Test get_embedder with legacy boolean parameters."""
@@ -334,7 +347,7 @@ class TestEnvironmentVariableHandling:
             self._test_single_embedder_type(embedder_type)
         else:
             # Test all embedder types
-            for et in ['openai', 'google', 'ollama', 'bedrock']:
+            for et in ['openai', 'google', 'ollama', 'bedrock', 'dashscope']:
                 self._test_single_embedder_type(et)
     
     def _test_single_embedder_type(self, embedder_type):
@@ -441,7 +454,7 @@ def run_all_tests():
     
     # Test embedder config with different types
     config_test = TestEmbedderConfiguration()
-    for embedder_type in ['openai', 'google', 'ollama', 'bedrock']:
+    for embedder_type in ['openai', 'google', 'ollama', 'bedrock', 'dashscope']:
         runner.run_test(
             lambda et=embedder_type: config_test.test_get_embedder_config(et),
             f"TestEmbedderConfiguration.test_get_embedder_config[{embedder_type}]"
@@ -464,7 +477,7 @@ def run_all_tests():
     
     # Test environment variable handling
     env_test = TestEnvironmentVariableHandling()
-    for embedder_type in ['openai', 'google', 'ollama', 'bedrock']:
+    for embedder_type in ['openai', 'google', 'ollama', 'bedrock', 'dashscope']:
         runner.run_test(
             lambda et=embedder_type: env_test.test_embedder_type_env_var(et),
             f"TestEnvironmentVariableHandling.test_embedder_type_env_var[{embedder_type}]"
