@@ -284,6 +284,16 @@ def load_lang_config():
 
     return loaded_config
 
+# Load vector database configuration
+def load_db_config():
+    """
+    Load vector database configuration (db.json).
+
+    Returns:
+        dict: Vector database configuration with backend, faiss, and pgvector settings
+    """
+    return load_json_config("db.json")
+
 # Default excluded directories and files
 DEFAULT_EXCLUDED_DIRS: List[str] = [
     # Virtual environments and package managers
@@ -333,6 +343,7 @@ generator_config = load_generator_config()
 embedder_config = load_embedder_config()
 repo_config = load_repo_config()
 lang_config = load_lang_config()
+db_config = load_db_config()
 
 # Update configuration
 if generator_config:
@@ -354,6 +365,11 @@ if repo_config:
 # Update language configuration
 if lang_config:
     configs["lang_config"] = lang_config
+
+# Update vector database configuration
+if db_config:
+    if "vector_db" in db_config:
+        configs["vector_db"] = db_config["vector_db"]
 
 
 def get_model_config(provider="google", model=None):

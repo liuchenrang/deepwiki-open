@@ -310,35 +310,44 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
                 continue
 
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    relative_path = os.path.relpath(file_path, path)
+                # Get relative path first
+                relative_path = os.path.relpath(file_path, path)
 
-                    # Determine if this is an implementation file
-                    is_implementation = (
-                        not relative_path.startswith("test_")
-                        and not relative_path.startswith("app_")
-                        and "test" not in relative_path.lower()
-                    )
+                # Try UTF-8 first, fallback to latin-1 for binary/non-UTF8 files
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                except UnicodeDecodeError:
+                    # Fallback to latin-1 which can read any byte sequence
+                    with open(file_path, "r", encoding="latin-1") as f:
+                        content = f.read()
+                    logger.warning(f"File {relative_path} is not UTF-8 encoded, read as latin-1")
 
-                    # Check token count
-                    token_count = count_tokens(content, embedder_type)
-                    if token_count > MAX_EMBEDDING_TOKENS * 10:
-                        logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
-                        continue
+                # Determine if this is an implementation file
+                is_implementation = (
+                    not relative_path.startswith("test_")
+                    and not relative_path.startswith("app_")
+                    and "test" not in relative_path.lower()
+                )
 
-                    doc = Document(
-                        text=content,
-                        meta_data={
-                            "file_path": relative_path,
-                            "type": ext[1:],
-                            "is_code": True,
-                            "is_implementation": is_implementation,
-                            "title": relative_path,
-                            "token_count": token_count,
-                        },
-                    )
-                    documents.append(doc)
+                # Check token count
+                token_count = count_tokens(content, embedder_type)
+                if token_count > MAX_EMBEDDING_TOKENS * 10:
+                    logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
+                    continue
+
+                doc = Document(
+                    text=content,
+                    meta_data={
+                        "file_path": relative_path,
+                        "type": ext[1:],
+                        "is_code": True,
+                        "is_implementation": is_implementation,
+                        "title": relative_path,
+                        "token_count": token_count,
+                    },
+                )
+                documents.append(doc)
             except Exception as e:
                 logger.error(f"Error reading {file_path}: {e}")
 
@@ -351,9 +360,18 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
                 continue
 
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    relative_path = os.path.relpath(file_path, path)
+                # Get relative path first
+                relative_path = os.path.relpath(file_path, path)
+
+                # Try UTF-8 first, fallback to latin-1 for binary/non-UTF8 files
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                except UnicodeDecodeError:
+                    # Fallback to latin-1 which can read any byte sequence
+                    with open(file_path, "r", encoding="latin-1") as f:
+                        content = f.read()
+                    logger.warning(f"File {relative_path} is not UTF-8 encoded, read as latin-1")
 
                     # Check token count
                     token_count = count_tokens(content, embedder_type)

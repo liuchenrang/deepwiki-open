@@ -1,0 +1,20 @@
+{
+  "vector_db": {
+    "backend": "pgvector",
+    "faiss": {
+      "index_path": "~/.adalflow/databases/",
+      "embedding_dimension": 1024,
+      "index_type": "Flat"
+    },
+    "pgvector": {
+      "connection_string": "${DATABASE_URL}",
+      "embedding_dimension": 1024,
+      "index_type": "hnsw",
+      "index_parameters": {
+        "m": 16,
+        "ef_construction": 64
+      },
+      "pool_size": 10
+    }
+  }
+}
