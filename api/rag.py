@@ -11,6 +11,166 @@ import adalflow as adal
 from api.tools.embedder import get_embedder
 from api.prompts import RAG_SYSTEM_PROMPT as system_prompt, RAG_TEMPLATE
 
+# Import vector database support
+try:
+    from api.vector_db import get_vector_db, DistanceMetric
+    VECTOR_DB_AVAILABLE = True
+except ImportError:
+    VECTOR_DB_AVAILABLE = False
+
+
+class VectorDBRetriever:
+    """
+    向量数据库检索器包装类
+
+    提供与 FAISSRetriever 相同的接口，但使用向量数据库后端。
+    """
+
+    def __init__(self, vector_db, embedder, documents):
+        """
+        初始化向量数据库检索器
+
+        Args:
+            vector_db: 向量数据库后端实例
+            embedder: 嵌入模型
+            documents: 文档列表（仅用于向后兼容）
+        """
+        logger.debug("=" * 80)
+        logger.debug("[VectorDBRetriever] 初始化开始")
+        logger.debug(f"   → embedder 类型: {type(embedder)}")
+        logger.debug(f"   → embedder 值: {embedder}")
+        logger.debug(f"   → callable(embedder): {callable(embedder)}")
+        logger.debug(f"   → hasattr __call__: {hasattr(embedder, '__call__')}")
+
+        # 验证 embedder 是否可调用
+        if isinstance(embedder, str):
+            error_msg = f"""
+❌ VectorDBRetriever 初始化失败：embedder 是字符串类型
+   → embedder 值: {embedder}
+   → 预期：可调用对象（Callable）
+   → 实际：字符串（str）
+
+💡 可能的原因：
+1. 配置文件中 embedder 设置错误
+2. embedder 未正确初始化
+3. 传递了错误的参数
+
+请检查 api/config.py 中的 embedder 配置
+"""
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        self.vector_db = vector_db
+        self.embedder = embedder
+        self.documents = documents
+        logger.debug("[VectorDBRetriever] 初始化完成")
+        logger.debug("=" * 80)
+
+    def __call__(self, query: str):
+        """
+        执行检索
+
+        Args:
+            query: 查询文本
+
+        Returns:
+            与 FAISSRetriever 兼容的结果列表
+        """
+        logger.debug(f"[VectorDBRetriever] 收到查询: {query[:50]}...")
+
+        # 获取查询向量
+        query_vector = None
+
+        # 尝试不同的 embedder 调用方式
+        try:
+            # 方法 1: embedder 是一个可调用对象，接受 input 参数
+            if hasattr(self.embedder, '__call__'):
+                logger.debug("[VectorDBRetriever] 使用 __call__ 方法")
+                result = self.embedder(input=query)
+                if hasattr(result, 'vector'):
+                    query_vector = result.vector
+                elif isinstance(result, list):
+                    query_vector = result
+                elif hasattr(result, 'embedding'):
+                    query_vector = result.embedding
+                else:
+                    # 尝试直接作为向量
+                    query_vector = result
+
+            # 方法 2: embedder 是一个函数，直接传入 query
+            elif callable(self.embedder):
+                logger.debug("[VectorDBRetriever] embedder 是可调用对象")
+                result = self.embedder(query)
+                if hasattr(result, 'vector'):
+                    query_vector = result.vector
+                elif isinstance(result, list):
+                    query_vector = result
+                elif hasattr(result, 'embedding'):
+                    query_vector = result.embedding
+                else:
+                    query_vector = result
+
+            # 方法 3: embedder 是一个类，需要创建实例
+            elif isinstance(self.embedder, type):
+                logger.debug(f"[VectorDBRetriever] embedder 是类: {self.embedder.__name__}")
+                embedder_instance = self.embedder()
+                result = embedder_instance(query)
+                if hasattr(result, 'vector'):
+                    query_vector = result.vector
+                elif isinstance(result, list):
+                    query_vector = result
+                else:
+                    query_vector = result
+
+            else:
+                raise ValueError(f"Unsupported embedder type: {type(self.embedder)}")
+
+        except Exception as e:
+            logger.error(f"[VectorDBRetriever] 获取查询向量失败: {e}")
+            logger.error(f"   embedder 类型: {type(self.embedder)}")
+            logger.error(f"   embedder: {self.embedder}")
+            raise
+
+        if query_vector is None:
+            raise ValueError("Failed to get query vector from embedder")
+
+        # 确保是列表格式
+        if not isinstance(query_vector, list):
+            query_vector = list(query_vector)
+
+        logger.debug(f"[VectorDBRetriever] 查询向量维度: {len(query_vector)}")
+
+        # 在向量数据库中搜索
+        search_results = self.vector_db.search(
+            query_vector=query_vector,
+            top_k=20,
+            distance_metric=DistanceMetric.COSINE
+        )
+
+        logger.debug(f"[VectorDBRetriever] 搜索到 {len(search_results)} 个结果")
+
+        # 转换为 FAISSRetriever 兼容的结果格式
+        from collections import namedtuple
+
+        RetrieverResult = namedtuple('RetrieverResult', ['doc_indices', 'documents'])
+
+        # 构建文档索引列表
+        doc_indices = []
+        result_docs = []
+
+        for i, result in enumerate(search_results):
+            # 在文档列表中查找匹配的文档
+            for j, doc in enumerate(self.documents):
+                if doc.text == result.document.text and doc.meta_data == result.document.meta_data:
+                    doc_indices.append(j)
+                    result_docs.append(doc)
+                    break
+
+        logger.debug(f"[VectorDBRetriever] 返回 {len(result_docs)} 个文档")
+
+        return [RetrieverResult(doc_indices=doc_indices, documents=result_docs)]
+
+
 # Create our own implementation of the conversation classes
 @dataclass
 class UserQuery:
@@ -358,8 +518,16 @@ IMPORTANT FORMATTING RULES:
             included_dirs: Optional list of directories to include exclusively
             included_files: Optional list of file patterns to include exclusively
         """
+        logger.info("=" * 80)
+        logger.info("🚀 [RAG] 开始准备检索器")
+        logger.info(f"   仓库: {repo_url_or_path}")
+        logger.info(f"   类型: {type}")
+        logger.info(f"   嵌入类型: {self.embedder_type}")
+
         self.initialize_db_manager()
         self.repo_url_or_path = repo_url_or_path
+
+        logger.info("   → 正在准备数据库...")
         self.transformed_docs = self.db_manager.prepare_database(
             repo_url_or_path,
             type,
@@ -370,7 +538,8 @@ IMPORTANT FORMATTING RULES:
             included_dirs=included_dirs,
             included_files=included_files
         )
-        logger.info(f"Loaded {len(self.transformed_docs)} documents for retrieval")
+        logger.info(f"   ✅ 已加载 {len(self.transformed_docs)} 个文档")
+        logger.info("=" * 80)
 
         # Validate and filter embeddings to ensure consistent sizes
         self.transformed_docs = self._validate_and_filter_embeddings(self.transformed_docs)
@@ -380,18 +549,83 @@ IMPORTANT FORMATTING RULES:
 
         logger.info(f"Using {len(self.transformed_docs)} documents with valid embeddings for retrieval")
 
+        logger.info("=" * 80)
+        logger.info("🔍 [RAG] 开始创建检索器")
+        logger.info(f"   可用文档数: {len(self.transformed_docs)}")
+
         try:
             # Use the appropriate embedder for retrieval
             retrieve_embedder = self.query_embedder if self.is_ollama_embedder else self.embedder
-            self.retriever = FAISSRetriever(
-                **configs["retriever"],
-                embedder=retrieve_embedder,
-                documents=self.transformed_docs,
-                document_map_func=lambda doc: doc.vector,
-            )
-            logger.info("FAISS retriever created successfully")
+
+            # Check if vector database backend is enabled
+            if (hasattr(self.db_manager, 'use_vector_db') and
+                self.db_manager.use_vector_db and
+                self.db_manager.vector_db):
+
+                logger.info("=" * 80)
+                logger.info("✨ [VECTOR DB] 使用向量数据库后端创建检索器")
+
+                # 分别记录每条日志，以便精确定位错误
+                try:
+                    vector_db_type = type(self.db_manager.vector_db)
+                    logger.info(f"   → 向量数据库类型: {getattr(vector_db_type, '__name__', str(vector_db_type))}")
+                except Exception as e:
+                    logger.error(f"   ❌ 获取向量数据库类型失败: {e}")
+
+                try:
+                    backend = self.db_manager.vector_db.config.get('backend', 'unknown') if isinstance(self.db_manager.vector_db.config, dict) else 'unknown'
+                    logger.info(f"   → 数据库配置: {backend}")
+                except Exception as e:
+                    logger.error(f"   ❌ 获取数据库配置失败: {e}")
+
+                try:
+                    embedder_type = type(retrieve_embedder)
+                    logger.info(f"   → retrieve_embedder 类型: {getattr(embedder_type, '__name__', str(embedder_type))}")
+                    logger.info(f"   → is_ollama_embedder: {self.is_ollama_embedder}")
+                except Exception as e:
+                    logger.error(f"   ❌ 记录 embedder 信息失败: {e}")
+
+                try:
+                    logger.info("   → 正在创建 VectorDBRetriever...")
+                    self.retriever = VectorDBRetriever(
+                        vector_db=self.db_manager.vector_db,
+                        embedder=retrieve_embedder,
+                        documents=self.transformed_docs
+                    )
+                    logger.info(f"   ✅ 向量数据库检索器创建成功")
+                    logger.info(f"   → 检索器类型: VectorDBRetriever")
+                except Exception as retriever_error:
+                    logger.error("=" * 80)
+                    logger.error(f"❌ [RAG] 创建 VectorDBRetriever 失败")
+                    logger.error(f"   → 错误: {retriever_error}")
+                    logger.error(f"   → 错误类型: {type(retriever_error).__name__}")
+                    logger.error(f"   → retrieve_embedder 类型: {type(retrieve_embedder)}")
+                    logger.error(f"   → retrieve_embedder 值: {retrieve_embedder}")
+                    raise
+                logger.info(f"   → 文档数量: {len(self.transformed_docs)}")
+                logger.info("🎉 [VECTOR DB] 向量数据库检索器初始化完成")
+                logger.info("=" * 80)
+            else:
+                logger.info("=" * 80)
+                logger.info("📦 [FAISS] 使用传统 FAISS 检索器")
+                logger.info(f"   → 向量数据库启用: {hasattr(self.db_manager, 'use_vector_db')}")
+                logger.info(f"   → use_vector_db: {getattr(self.db_manager, 'use_vector_db', False)}")
+                logger.info(f"   → vector_db 存在: {hasattr(self.db_manager, 'vector_db') and self.db_manager.vector_db is not None}")
+
+                # Use traditional FAISS retriever
+                logger.info("   → 正在创建 FAISSRetriever...")
+                self.retriever = FAISSRetriever(
+                    **configs["retriever"],
+                    embedder=retrieve_embedder,
+                    documents=self.transformed_docs,
+                    document_map_func=lambda doc: doc.vector,
+                )
+                logger.info(f"   ✅ FAISS 检索器创建成功")
+                logger.info("=" * 80)
         except Exception as e:
-            logger.error(f"Error creating FAISS retriever: {str(e)}")
+            logger.error("=" * 80)
+            logger.error(f"❌ [RAG] 创建检索器失败: {str(e)}")
+            logger.error(f"   → 错误类型: {type(e).__name__}")
             # Try to provide more specific error information
             if "All embeddings should be of the same size" in str(e):
                 logger.error("Embedding size validation failed. This suggests there are still inconsistent embedding sizes.")
@@ -412,6 +646,7 @@ IMPORTANT FORMATTING RULES:
                         except:
                             sizes.append(f"doc_{i}: error")
                 logger.error(f"Sample embedding sizes: {', '.join(sizes)}")
+            logger.error("=" * 80)
             raise
 
     def call(self, query: str, language: str = "en") -> Tuple[List]:

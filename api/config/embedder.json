@@ -32,7 +32,7 @@
   },
   "embedder_dashscope": {
     "client_class": "DashscopeClient",
-    "batch_size": 25,
+    "batch_size": 10,
     "model_kwargs": {
       "model": "text-embedding-v3",
       "dimensions": 1024

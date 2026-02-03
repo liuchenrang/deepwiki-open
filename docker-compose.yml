@@ -16,7 +16,8 @@ services:
       - LOG_FILE_PATH=${LOG_FILE_PATH:-api/logs/application.log}
     volumes:
       - ~/.adalflow:/root/.adalflow      # Persist repository and embedding data
-      - ./api/logs:/app/api/logs          # Persist log files across container restarts
+      - ./api/logs:/app/api/logs         # Persist log files across container restarts
+      - ./api:/app/api                   # Mount api directory for live code updates
       - /Users/chen/IdeaProjects/yehwang/ywmall:/ywmall:rw
     # Resource limits for docker-compose up (not Swarm mode)
     mem_limit: 6g

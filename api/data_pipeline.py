@@ -730,12 +730,15 @@ def get_file_content(repo_url: str, file_path: str, repo_type: str = None, acces
 class DatabaseManager:
     """
     Manages the creation, loading, transformation, and persistence of LocalDB instances.
+    Supports both traditional LocalDB (faiss) and vector database backends (pgvector).
     """
 
     def __init__(self):
         self.db = None
         self.repo_url_or_path = None
         self.repo_paths = None
+        self.vector_db = None  # Vector database backend (pgvector or faiss)
+        self.use_vector_db = False  # Whether to use vector database backend
 
     def prepare_database(self, repo_url_or_path: str, repo_type: str = None, access_token: str = None,
                          embedder_type: str = None, is_ollama_embedder: bool = None,
@@ -776,6 +779,8 @@ class DatabaseManager:
         self.db = None
         self.repo_url_or_path = None
         self.repo_paths = None
+        self.vector_db = None
+        self.use_vector_db = False
 
     def _extract_repo_name_from_url(self, repo_url_or_path: str, repo_type: str) -> str:
         # Extract owner and repo name to create unique identifier
@@ -791,6 +796,135 @@ class DatabaseManager:
         else:
             repo_name = url_parts[-1].replace(".git", "")
         return repo_name
+
+    def _init_vector_db_backend(self, repo_url_or_path: str, repo_type: str = None):
+        """
+        Initialize vector database backend if VECTOR_DB_BACKEND is configured.
+
+        Args:
+            repo_url_or_path: Repository URL or local path
+            repo_type: Repository type (github, gitlab, bitbucket, local)
+
+        Raises:
+            ImportError: 如果 pgvector 依赖缺失
+            Exception: 如果初始化失败
+        """
+        logger.info("=" * 80)
+        logger.info("🔍 [VECTOR DB] 开始初始化向量数据库后端")
+        logger.info(f"   仓库路径: {repo_url_or_path}")
+        logger.info(f"   仓库类型: {repo_type}")
+
+        # 检查环境变量
+        vector_db_backend = os.getenv("VECTOR_DB_BACKEND", "faiss")
+        logger.info(f"   环境变量 VECTOR_DB_BACKEND: {vector_db_backend}")
+
+        # 如果配置的是 pgvector，必须成功初始化，否则报错
+        if vector_db_backend == "pgvector":
+            logger.info("   → 配置要求使用 pgvector 后端")
+            logger.info("   → 正在尝试创建向量数据库实例...")
+
+            try:
+                from api.vector_db import get_vector_db
+
+                logger.info("   → 正在创建向量数据库实例...")
+                vector_db = get_vector_db()
+                logger.info(f"   ✅ 向量数据库实例创建成功: {type(vector_db).__name__}")
+
+                # Set repository context for pgvector
+                if hasattr(vector_db, 'use_repository'):
+                    # Extract owner and repo from URL
+                    owner = "local"
+                    repo = "unknown"
+
+                    if repo_type in ["github", "gitlab", "bitbucket"]:
+                        url_parts = repo_url_or_path.rstrip('/').split('/')
+                        if len(url_parts) >= 5:
+                            owner = url_parts[-2]
+                            repo = url_parts[-1].replace(".git", "")
+                    else:
+                        # Local path
+                        repo = os.path.basename(repo_url_or_path)
+
+                    logger.info(f"   → 正在设置仓库上下文: {owner}/{repo}")
+                    vector_db.use_repository(owner=owner, repo=repo, repo_url=repo_url_or_path)
+                    logger.info(f"   ✅ 仓库上下文设置成功")
+
+                self.vector_db = vector_db
+                self.use_vector_db = True
+
+                logger.info(f"🎉 [VECTOR DB] 向量数据库后端初始化完成: {type(vector_db).__name__}")
+                logger.info(f"   → 后端类型: {type(vector_db).__name__}")
+                logger.info(f"   → 向量维度: {vector_db.embedding_dimension}")
+                logger.info("=" * 80)
+
+            except ImportError as e:
+                # pgvector 依赖缺失，明确报错
+                error_msg = f"""
+❌ pgvector 后端初始化失败：缺少必需的依赖包
+
+错误详情: {str(e)}
+
+💡 解决方案：
+
+1. 重新构建 Docker 镜像（推荐）：
+   docker-compose down
+   docker-compose build deepwiki
+   docker-compose up -d
+
+2. 或在容器中手动安装：
+   docker-compose exec deepwiki pip install psycopg[binary] pgvector
+
+3. 或在开发环境中安装：
+   pip install psycopg[binary] pgvector
+
+📝 配置文件: api/pyproject.toml
+   确保 poetry.lock 已更新
+"""
+                logger.error("=" * 80)
+                logger.error(error_msg)
+                logger.error("=" * 80)
+                raise ImportError(error_msg) from e
+
+            except Exception as e:
+                # 其他初始化错误，也明确报错
+                error_msg = f"""
+❌ pgvector 后端初始化失败
+
+配置要求: VECTOR_DB_BACKEND=pgvector
+仓库类型: {repo_type}
+仓库路径: {repo_url_or_path}
+
+错误类型: {type(e).__name__}
+错误详情: {str(e)}
+
+💡 可能的原因：
+1. PostgreSQL 连接失败（检查 DATABASE_URL 配置）
+2. pgvector 扩展未安装（需要在 PostgreSQL 中运行 CREATE EXTENSION vector）
+3. 数据库权限不足
+
+📝 故障排查：
+   docker-compose exec deepwiki python -c "
+   import psycopg
+   from pgvector.psycopg import register_vector
+   conn = psycopg.connect(os.getenv('DATABASE_URL'))
+   register_vector(conn)
+   print('✅ 连接成功')
+   "
+"""
+                logger.error("=" * 80)
+                logger.error(error_msg)
+                logger.error("=" * 80)
+                raise RuntimeError(f"pgvector backend initialization failed: {str(e)}") from e
+        else:
+            # 配置的是 faiss 或未设置，不使用向量数据库
+            logger.info("=" * 80)
+            logger.info(f"ℹ️  [VECTOR DB] 配置使用传统 FAISS 后端")
+            logger.info(f"   → VECTOR_DB_BACKEND: {vector_db_backend}")
+            logger.info(f"   → 数据将保存在本地文件系统 (~/.adalflow/databases/)")
+            logger.info("=" * 80)
+
+            self.vector_db = None
+            self.use_vector_db = False
 
     def _create_repo(self, repo_url_or_path: str, repo_type: str = None, access_token: str = None) -> None:
         """
@@ -842,6 +976,9 @@ class DatabaseManager:
             self.repo_url_or_path = repo_url_or_path
             logger.info(f"Repo paths: {self.repo_paths}")
 
+            # Initialize vector database backend if configured
+            self._init_vector_db_backend(repo_url_or_path, repo_type)
+
         except Exception as e:
             logger.error(f"Failed to create repository structure: {e}")
             raise
@@ -883,6 +1020,9 @@ class DatabaseManager:
         # Handle backward compatibility
         if embedder_type is None and is_ollama_embedder is not None:
             embedder_type = 'ollama' if is_ollama_embedder else None
+
+        transformed_docs = None  # 标记是否已加载文档
+
         # check the database
         if self.repo_paths and os.path.exists(self.repo_paths["save_db_file"]):
             logger.info("Loading existing database...")
@@ -907,27 +1047,62 @@ class DatabaseManager:
                             "Existing database contains no usable embeddings. Rebuilding embeddings..."
                         )
                     else:
-                        return documents
+                        # ✅ 加载现有数据库成功，保存文档引用
+                        transformed_docs = documents
+                        logger.info(f"✅ 已加载 {len(transformed_docs)} 个文档，将保存到向量数据库")
             except Exception as e:
                 logger.error(f"Error loading existing database: {e}")
                 # Continue to create a new database
 
-        # prepare the database
-        logger.info("Creating new database...")
-        documents = read_all_documents(
-            self.repo_paths["save_repo_dir"],
-            embedder_type=embedder_type,
-            excluded_dirs=excluded_dirs,
-            excluded_files=excluded_files,
-            included_dirs=included_dirs,
-            included_files=included_files
-        )
-        self.db = transform_documents_and_save_to_db(
-            documents, self.repo_paths["save_db_file"], embedder_type=embedder_type
-        )
-        logger.info(f"Total documents: {len(documents)}")
-        transformed_docs = self.db.get_transformed_data(key="split_and_embed")
-        logger.info(f"Total transformed documents: {len(transformed_docs)}")
+        # 如果没有加载现有数据库，则创建新数据库
+        if transformed_docs is None:
+            # prepare the database
+            logger.info("Creating new database...")
+            documents = read_all_documents(
+                self.repo_paths["save_repo_dir"],
+                embedder_type=embedder_type,
+                excluded_dirs=excluded_dirs,
+                excluded_files=excluded_files,
+                included_dirs=included_dirs,
+                included_files=included_files
+            )
+            self.db = transform_documents_and_save_to_db(
+                documents, self.repo_paths["save_db_file"], embedder_type=embedder_type
+            )
+            logger.info(f"Total documents: {len(documents)}")
+            transformed_docs = self.db.get_transformed_data(key="split_and_embed")
+            logger.info(f"Total transformed documents: {len(transformed_docs)}")
+
+        # If vector database backend is enabled, also save to vector DB
+        if self.use_vector_db and self.vector_db and transformed_docs:
+            try:
+                logger.info("=" * 80)
+                logger.info("💾 [VECTOR DB] 正在保存文档到向量数据库")
+                logger.info(f"   → 文档数量: {len(transformed_docs)}")
+                logger.info(f"   → 向量数据库类型: {type(self.vector_db).__name__}")
+
+                logger.info(f"   → 正在调用 add_documents()...")
+                doc_ids = self.vector_db.add_documents(transformed_docs)
+
+                logger.info(f"   ✅ 成功保存 {len(doc_ids)} 个文档到向量数据库")
+                logger.info(f"   → 文档 IDs (前5个): {doc_ids[:5] if len(doc_ids) > 5 else doc_ids}")
+
+                # 验证保存
+                if hasattr(self.vector_db, 'count_documents'):
+                    count = self.vector_db.count_documents()
+                    logger.info(f"   ✅ 验证: 数据库中当前文档总数: {count}")
+
+                logger.info("🎉 [VECTOR DB] 文档保存完成")
+                logger.info("=" * 80)
+
+            except Exception as e:
+                logger.error(f"❌ [VECTOR DB] 保存文档到向量数据库失败: {e}")
+                logger.error(f"   → 错误类型: {type(e).__name__}")
+                import traceback
+                logger.error(f"   → 详细错误:\n{traceback.format_exc()}")
+                logger.info("   → 将继续使用传统 LocalDB")
+                # Continue without vector DB
+
         return transformed_docs
 
     def prepare_retriever(self, repo_url_or_path: str, repo_type: str = None, access_token: str = None):
