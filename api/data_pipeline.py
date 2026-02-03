@@ -429,6 +429,15 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
     if embedder_type == 'ollama':
         # Use Ollama document processor for single-document processing
         embedder_transformer = OllamaDocumentProcessor(embedder=embedder)
+    elif embedder_type == 'dashscope':
+        # Use DashScope-specific batch processor with proper batch size limits
+        from api.dashscope_client import DashScopeToEmbeddings
+        batch_size = embedder_config.get("batch_size", 10)  # DashScope API 限制为 10
+        embedder_transformer = DashScopeToEmbeddings(
+            embedder=embedder,
+            batch_size=batch_size,
+            embedding_cache_file_name=f"{embedder_type}_embeddings"
+        )
     else:
         # Use batch processing for OpenAI and Google embedders
         batch_size = embedder_config.get("batch_size", 500)
