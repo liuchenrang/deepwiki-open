@@ -239,17 +239,24 @@ class PgvectorBackend(VectorDBBackend):
         Returns:
             文档 ID 列表
         """
+        logger.debug(f"[pgvector] add_documents() 被调用，文档数: {len(documents)}")
+
         if self.repository_id is None:
+            logger.error("[pgvector] Repository not set. Call use_repository() first.")
             raise ValueError("Repository not set. Call use_repository() first.")
 
+        logger.info(f"[pgvector] 正在添加 {len(documents)} 个文档到 repository_id={self.repository_id}")
+
         document_ids = []
+        skipped = 0
 
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                for doc in documents:
+                for idx, doc in enumerate(documents):
                     # 检查是否有向量
                     if not hasattr(doc, 'vector') or doc.vector is None:
-                        logger.warning("Document has no vector, skipping")
+                        logger.warning(f"[pgvector] 文档 {idx} 没有向量，跳过")
+                        skipped += 1
                         continue
 
                     # 向量转换为字符串格式
@@ -276,9 +283,12 @@ class PgvectorBackend(VectorDBBackend):
                     doc_id = f"pg_{cur.fetchone()[0]}"
                     document_ids.append(doc_id)
 
+                    if (idx + 1) % 50 == 0:
+                        logger.debug(f"[pgvector] 已处理 {idx + 1}/{len(documents)} 个文档")
+
                 conn.commit()
 
-        logger.info(f"Added {len(document_ids)} documents to pgvector")
+        logger.info(f"[pgvector] ✅ 成功添加 {len(document_ids)} 个文档，跳过 {skipped} 个")
         return document_ids
 
     def delete_documents(self, document_ids: List[str]) -> int:
