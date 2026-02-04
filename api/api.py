@@ -632,3 +632,12 @@ async def get_processed_projects():
     except Exception as e:
         logger.error(f"Error listing processed projects from {WIKI_CACHE_DIR}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to list processed projects from server cache.")
+
+# --- Wiki Projects List Endpoint --- (Alias for frontend compatibility)
+@app.get("/api/wiki/projects", response_model=List[ProcessedProjectEntry])
+async def get_wiki_projects():
+    """
+    Alias for /api/processed_projects for frontend compatibility.
+    Returns the same list of processed projects.
+    """
+    return await get_processed_projects()

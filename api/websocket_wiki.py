@@ -713,7 +713,14 @@ This file contains...
                 await websocket.close()
 
         except Exception as e_outer:
+            import traceback
             logger.error(f"Error in streaming response: {str(e_outer)}")
+            logger.error(f"Full exception type: {type(e_outer).__name__}")
+            logger.error(f"Exception args: {e_outer.args}")
+            logger.error("=" * 80)
+            logger.error("Full traceback:")
+            logger.error(traceback.format_exc())
+            logger.error("=" * 80)
             error_message = str(e_outer)
 
             # Check for token limit errors

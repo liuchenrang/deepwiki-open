@@ -9,6 +9,8 @@
       "./bower_components/", 
       "./jspm_packages/",
       "./.git/", 
+      "./vendor/", 
+      "./test/", 
       "./.svn/", 
       "./.hg/", 
       "./.bzr/"
@@ -27,6 +29,8 @@
       "Thumbs.db", 
       "desktop.ini", 
       "*.lnk", 
+      "*.css", 
+      "*.js", 
       ".env", 
       ".env.*", 
       "*.env", 

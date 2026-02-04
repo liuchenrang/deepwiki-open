@@ -122,12 +122,18 @@ def get_vector_db(config: Any = None) -> VectorDBBackend:
     # 创建对应的后端实例
     if backend == "faiss":
         from api.vector_db.faiss_backend import FaissBackend
-        return FaissBackend(vector_db_config.config)
+        # 添加 backend 标识到 config
+        faiss_config = vector_db_config.config.copy()
+        faiss_config['backend'] = 'faiss'
+        return FaissBackend(faiss_config)
 
     elif backend == "pgvector":
         try:
             from api.vector_db.pgvector_backend import PgvectorBackend
-            return PgvectorBackend(vector_db_config.config)
+            # 添加 backend 标识到 config
+            pgvector_config = vector_db_config.config.copy()
+            pgvector_config['backend'] = 'pgvector'
+            return PgvectorBackend(pgvector_config)
         except ImportError as e:
             logger.error(f"Failed to import pgvector backend: {e}")
             logger.error("Please install required dependencies:")

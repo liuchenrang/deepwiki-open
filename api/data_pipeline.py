@@ -397,7 +397,7 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
     logger.info(f"Found {len(documents)} documents")
     return documents
 
-def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = None):
+def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = None, repo_name: str = None):
     """
     Creates and returns the data transformation pipeline.
 
@@ -406,6 +406,8 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
                                      If None, will be determined from configuration.
         is_ollama_embedder (bool, optional): DEPRECATED. Use embedder_type instead.
                                            If None, will be determined from configuration.
+        repo_name (str, optional): Repository name for cache isolation. If provided,
+                                  will be used to create unique cache files per repository.
 
     Returns:
         adal.Sequential: The data transformation pipeline
@@ -415,7 +417,7 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
     # Handle backward compatibility
     if embedder_type is None and is_ollama_embedder is not None:
         embedder_type = 'ollama' if is_ollama_embedder else None
-    
+
     # Determine embedder type if not specified
     if embedder_type is None:
         embedder_type = get_embedder_type()
@@ -433,10 +435,12 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
         # Use DashScope-specific batch processor with proper batch size limits
         from api.dashscope_client import DashScopeToEmbeddings
         batch_size = embedder_config.get("batch_size", 10)  # DashScope API 限制为 10
+        # 使用 repo_name 作为缓存文件名的一部分，确保每个仓库有独立的缓存
+        cache_suffix = repo_name if repo_name else "embeddings"
         embedder_transformer = DashScopeToEmbeddings(
             embedder=embedder,
             batch_size=batch_size,
-            embedding_cache_file_name=f"{embedder_type}_embeddings"
+            embedding_cache_file_name=f"{embedder_type}_{cache_suffix}"
         )
     else:
         # Use batch processing for OpenAI and Google embedders
@@ -451,7 +455,8 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
     return data_transformer
 
 def transform_documents_and_save_to_db(
-    documents: List[Document], db_path: str, embedder_type: str = None, is_ollama_embedder: bool = None
+    documents: List[Document], db_path: str, embedder_type: str = None, is_ollama_embedder: bool = None,
+    repo_name: str = None
 ) -> LocalDB:
     """
     Transforms a list of documents and saves them to a local database.
@@ -463,9 +468,10 @@ def transform_documents_and_save_to_db(
                                      If None, will be determined from configuration.
         is_ollama_embedder (bool, optional): DEPRECATED. Use embedder_type instead.
                                            If None, will be determined from configuration.
+        repo_name (str, optional): Repository name for cache isolation.
     """
     # Get the data transformer
-    data_transformer = prepare_data_pipeline(embedder_type, is_ollama_embedder)
+    data_transformer = prepare_data_pipeline(embedder_type, is_ollama_embedder, repo_name)
 
     # Save the documents to a local database
     db = LocalDB()
@@ -838,6 +844,9 @@ class DatabaseManager:
                 logger.info("   → 正在创建向量数据库实例...")
                 vector_db = get_vector_db()
                 logger.info(f"   ✅ 向量数据库实例创建成功: {type(vector_db).__name__}")
+                logger.info(f"   → vector_db.config 类型: {type(vector_db.config)}")
+                logger.info(f"   → vector_db.config 内容: {vector_db.config}")
+                logger.info(f"   → config.get('backend'): {vector_db.config.get('backend', 'NOT_FOUND')}")
 
                 # Set repository context for pgvector
                 if hasattr(vector_db, 'use_repository'):
@@ -1075,8 +1084,10 @@ class DatabaseManager:
                 included_dirs=included_dirs,
                 included_files=included_files
             )
+            # Extract repo name from db file path for cache isolation
+            repo_name = os.path.basename(self.repo_paths["save_db_file"]).replace('.pkl', '')
             self.db = transform_documents_and_save_to_db(
-                documents, self.repo_paths["save_db_file"], embedder_type=embedder_type
+                documents, self.repo_paths["save_db_file"], embedder_type=embedder_type, repo_name=repo_name
             )
             logger.info(f"Total documents: {len(documents)}")
             transformed_docs = self.db.get_transformed_data(key="split_and_embed")

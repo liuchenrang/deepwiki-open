@@ -87,12 +87,28 @@ class VectorDBRetriever:
             if hasattr(self.embedder, '__call__'):
                 logger.debug("[VectorDBRetriever] 使用 __call__ 方法")
                 result = self.embedder(input=query)
-                if hasattr(result, 'vector'):
+                logger.debug(f"[VectorDBRetriever] result 类型: {type(result)}")
+
+                # 处理 EmbedderOutput 对象
+                if hasattr(result, 'data') and result.data:
+                    # DashScope 返回的 EmbedderOutput，data 是包含 embedding 的列表
+                    if len(result.data) > 0 and hasattr(result.data[0], 'embedding'):
+                        query_vector = result.data[0].embedding
+                        logger.debug(f"[VectorDBRetriever] 从 result.data[0].embedding 获取向量")
+                    else:
+                        query_vector = result.data
+                elif hasattr(result, 'vector'):
                     query_vector = result.vector
                 elif isinstance(result, list):
                     query_vector = result
                 elif hasattr(result, 'embedding'):
-                    query_vector = result.embedding
+                    # 检查 embedding 是否是列表或数组
+                    emb = result.embedding
+                    if isinstance(emb, (list, tuple)) or (hasattr(emb, '__iter__') and not isinstance(emb, str)):
+                        query_vector = list(emb) if not isinstance(emb, list) else emb
+                        logger.debug(f"[VectorDBRetriever] 从 result.embedding 获取向量，长度: {len(query_vector)}")
+                    else:
+                        query_vector = result.embedding
                 else:
                     # 尝试直接作为向量
                     query_vector = result
@@ -101,12 +117,26 @@ class VectorDBRetriever:
             elif callable(self.embedder):
                 logger.debug("[VectorDBRetriever] embedder 是可调用对象")
                 result = self.embedder(query)
-                if hasattr(result, 'vector'):
+                logger.debug(f"[VectorDBRetriever] result 类型: {type(result)}")
+
+                # 处理 EmbedderOutput 对象
+                if hasattr(result, 'data') and result.data:
+                    if len(result.data) > 0 and hasattr(result.data[0], 'embedding'):
+                        query_vector = result.data[0].embedding
+                        logger.debug(f"[VectorDBRetriever] 从 result.data[0].embedding 获取向量")
+                    else:
+                        query_vector = result.data
+                elif hasattr(result, 'vector'):
                     query_vector = result.vector
                 elif isinstance(result, list):
                     query_vector = result
                 elif hasattr(result, 'embedding'):
-                    query_vector = result.embedding
+                    emb = result.embedding
+                    if isinstance(emb, (list, tuple)) or (hasattr(emb, '__iter__') and not isinstance(emb, str)):
+                        query_vector = list(emb) if not isinstance(emb, list) else emb
+                        logger.debug(f"[VectorDBRetriever] 从 result.embedding 获取向量，长度: {len(query_vector)}")
+                    else:
+                        query_vector = result.embedding
                 else:
                     query_vector = result
 
@@ -115,6 +145,8 @@ class VectorDBRetriever:
                 logger.debug(f"[VectorDBRetriever] embedder 是类: {self.embedder.__name__}")
                 embedder_instance = self.embedder()
                 result = embedder_instance(query)
+                logger.debug(f"[VectorDBRetriever] result 类型: {type(result)}")
+
                 if hasattr(result, 'vector'):
                     query_vector = result.vector
                 elif isinstance(result, list):
@@ -149,10 +181,8 @@ class VectorDBRetriever:
 
         logger.debug(f"[VectorDBRetriever] 搜索到 {len(search_results)} 个结果")
 
-        # 转换为 FAISSRetriever 兼容的结果格式
-        from collections import namedtuple
-
-        RetrieverResult = namedtuple('RetrieverResult', ['doc_indices', 'documents'])
+        # 转换为 FAISSRetriever 兼容的结果格式（使用 RetrieverOutput）
+        from adalflow.components.retriever.faiss_retriever import RetrieverOutput
 
         # 构建文档索引列表
         doc_indices = []
@@ -168,7 +198,8 @@ class VectorDBRetriever:
 
         logger.debug(f"[VectorDBRetriever] 返回 {len(result_docs)} 个文档")
 
-        return [RetrieverResult(doc_indices=doc_indices, documents=result_docs)]
+        # 使用 RetrieverOutput（dataclass，可变）而不是 namedtuple
+        return [RetrieverOutput(doc_indices=doc_indices, documents=result_docs)]
 
 
 # Create our own implementation of the conversation classes
@@ -503,7 +534,7 @@ IMPORTANT FORMATTING RULES:
 
         return valid_documents
 
-    def prepare_retriever(self, repo_url_or_path: str, type: str = "github", access_token: str = None,
+    def prepare_retriever(self, repo_url_or_path: str, repo_type: str = "github", access_token: str = None,
                       excluded_dirs: List[str] = None, excluded_files: List[str] = None,
                       included_dirs: List[str] = None, included_files: List[str] = None):
         """
@@ -521,7 +552,7 @@ IMPORTANT FORMATTING RULES:
         logger.info("=" * 80)
         logger.info("🚀 [RAG] 开始准备检索器")
         logger.info(f"   仓库: {repo_url_or_path}")
-        logger.info(f"   类型: {type}")
+        logger.info(f"   类型: {repo_type}")
         logger.info(f"   嵌入类型: {self.embedder_type}")
 
         self.initialize_db_manager()
@@ -530,7 +561,7 @@ IMPORTANT FORMATTING RULES:
         logger.info("   → 正在准备数据库...")
         self.transformed_docs = self.db_manager.prepare_database(
             repo_url_or_path,
-            type,
+            repo_type,
             access_token,
             embedder_type=self.embedder_type,
             excluded_dirs=excluded_dirs,
