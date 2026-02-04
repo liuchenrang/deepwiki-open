@@ -208,6 +208,12 @@ class PgvectorBackend(VectorDBBackend):
         Returns:
             仓库 ID
         """
+        logger.info("=" * 80)
+        logger.info(f"[pgvector] use_repository() 被调用")
+        logger.info(f"   → owner: {owner}")
+        logger.info(f"   → repo: {repo}")
+        logger.info(f"   → repo_url: {repo_url}")
+
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 # 查找或创建仓库
@@ -226,8 +232,67 @@ class PgvectorBackend(VectorDBBackend):
                 self.repository_id = result[0]
                 conn.commit()
 
-        logger.info(f"Using repository: {owner}/{repo} (ID={self.repository_id})")
+        logger.info(f"[pgvector] ✅ Using repository: {owner}/{repo} (ID={self.repository_id})")
+        logger.info("=" * 80)
         return self.repository_id
+
+    def get_current_commit(self) -> Optional[str]:
+        """
+        获取当前仓库的 commit hash
+
+        Returns:
+            Optional[str]: commit hash，如果未设置返回 None
+        """
+        if self.repository_id is None:
+            logger.warning("[pgvector] Repository not set. Call use_repository() first.")
+            return None
+
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT current_commit FROM repositories WHERE id = %s",
+                        (self.repository_id,)
+                    )
+                    result = cur.fetchone()
+                    if result and result[0]:
+                        return result[0]
+                    return None
+        except Exception as e:
+            logger.error(f"[pgvector] Failed to get current commit: {e}")
+            return None
+
+    def update_current_commit(self, commit_hash: str) -> bool:
+        """
+        更新当前仓库的 commit hash
+
+        Args:
+            commit_hash: 新的 commit hash
+
+        Returns:
+            bool: 是否成功更新
+        """
+        if self.repository_id is None:
+            logger.warning("[pgvector] Repository not set. Call use_repository() first.")
+            return False
+
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE repositories
+                        SET current_commit = %s, updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (commit_hash, self.repository_id)
+                    )
+                    conn.commit()
+                    logger.info(f"[pgvector] Updated commit to {commit_hash[:8]} for repository_id={self.repository_id}")
+                    return True
+        except Exception as e:
+            logger.error(f"[pgvector] Failed to update current commit: {e}")
+            return False
 
     def add_documents(self, documents: List[Document], **kwargs) -> List[str]:
         """
@@ -239,11 +304,25 @@ class PgvectorBackend(VectorDBBackend):
         Returns:
             文档 ID 列表
         """
-        logger.debug(f"[pgvector] add_documents() 被调用，文档数: {len(documents)}")
+        logger.info("=" * 80)
+        logger.info(f"[pgvector] add_documents() 被调用")
+        logger.info(f"   → 文档数: {len(documents)}")
+        logger.info(f"   → repository_id: {self.repository_id}")
 
         if self.repository_id is None:
             logger.error("[pgvector] Repository not set. Call use_repository() first.")
             raise ValueError("Repository not set. Call use_repository() first.")
+
+        # 检查第一个文档的向量状态
+        if documents and len(documents) > 0:
+            first_doc = documents[0]
+            logger.info(f"   → 第一个文档类型: {type(first_doc)}")
+            logger.info(f"   → 第一个文档有向量属性: {hasattr(first_doc, 'vector')}")
+            if hasattr(first_doc, 'vector'):
+                logger.info(f"   → 第一个文档向量值: {first_doc.vector}")
+                logger.info(f"   → 第一个文档向量类型: {type(first_doc.vector)}")
+                if first_doc.vector is not None and hasattr(first_doc.vector, '__len__'):
+                    logger.info(f"   → 第一个文档向量长度: {len(first_doc.vector)}")
 
         logger.info(f"[pgvector] 正在添加 {len(documents)} 个文档到 repository_id={self.repository_id}")
 
@@ -253,42 +332,124 @@ class PgvectorBackend(VectorDBBackend):
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 for idx, doc in enumerate(documents):
+                    # 🔍 调试日志：显示每个文档的向量信息
+                    logger.info(f"[pgvector] 处理文档 {idx}:")
+                    logger.info(f"   → 文件路径: {doc.meta_data.get('file_path', 'unknown')}")
+                    logger.info(f"   → 有向量属性: {hasattr(doc, 'vector')}")
+                    if hasattr(doc, 'vector') and doc.vector is not None:
+                        logger.info(f"   → 向量类型: {type(doc.vector)}")
+                        if hasattr(doc.vector, '__len__'):
+                            logger.info(f"   → 向量长度: {len(doc.vector)}")
+
                     # 检查是否有向量
                     if not hasattr(doc, 'vector') or doc.vector is None:
                         logger.warning(f"[pgvector] 文档 {idx} 没有向量，跳过")
                         skipped += 1
                         continue
 
-                    # 向量转换为字符串格式
-                    vector_str = str(doc.vector)
+                    # 🔧 关键修复：验证向量不为空
+                    vector = doc.vector
+                    if hasattr(vector, '__len__') and len(vector) == 0:
+                        logger.error(f"[pgvector] ❌ 文档 {idx} 向量为空，跳过")
+                        logger.error(f"   → 文件路径: {doc.meta_data.get('file_path', 'unknown')}")
+                        logger.error(f"   → 文本长度: {len(doc.text)} 字符")
+                        logger.error(f"   → 向量类型: {type(vector)}")
+                        logger.error(f"   → 向量值: {vector}")
+                        skipped += 1
+                        continue
 
-                    # 插入文档
-                    cur.execute("""
-                        INSERT INTO document_chunks
-                        (repository_id, chunk_index, file_path, file_type,
-                         content, embedding, token_count, metadata)
-                        VALUES (%s, %s, %s, %s, %s, %s::vector, %s, %s)
-                        RETURNING id
-                    """, (
-                        self.repository_id,
-                        doc.meta_data.get('chunk_index', 0),
-                        doc.meta_data.get('file_path', ''),
-                        doc.meta_data.get('type', ''),
-                        doc.text,
-                        vector_str,
-                        doc.meta_data.get('token_count', 0),
-                        json.dumps(doc.meta_data)
-                    ))
+                    # 🔧 关键修复：验证向量维度
+                    vector_length = None
+                    if hasattr(vector, '__len__'):
+                        vector_length = len(vector)
+                    elif hasattr(vector, 'shape') and len(vector.shape) > 0:
+                        vector_length = vector.shape[-1]
 
-                    doc_id = f"pg_{cur.fetchone()[0]}"
-                    document_ids.append(doc_id)
+                    if vector_length is not None and vector_length != self.embedding_dimension:
+                        logger.error(f"[pgvector] ❌ 文档 {idx} 向量维度不匹配")
+                        logger.error(f"   → 文件路径: {doc.meta_data.get('file_path', 'unknown')}")
+                        logger.error(f"   → 期望维度: {self.embedding_dimension}")
+                        logger.error(f"   → 实际维度: {vector_length}")
+                        logger.error(f"   → 向量类型: {type(vector)}")
+                        skipped += 1
+                        continue
+
+                    # 🔍 调试日志：显示向量信息（只在第一个文档时）
+                    if idx == 0:
+                        logger.info(f"[pgvector] 第一个文档向量详情:")
+                        logger.info(f"   → 向量类型: {type(doc.vector)}")
+                        logger.info(f"   → 向量长度: {vector_length if vector_length else 'unknown'}")
+                        logger.info(f"   → 文档元数据: {doc.meta_data}")
+
+                    # 🔧 修复：清理文档内容中的 null 字节（PostgreSQL 不支持）
+                    content = doc.text
+                    if '\x00' in content:
+                        # 替换 null 字节为空格
+                        content = content.replace('\x00', ' ')
+                        logger.debug(f"[pgvector] 文档 {idx} 包含 null 字节，已清理")
+
+                    # 🔧 关键修复：确保向量是 Python list 格式（不是 numpy array）
+                    # pgvector 的 psycopg 适配器会自动处理 list → vector 的转换
+                    vector = doc.vector
+                    if hasattr(vector, 'tolist'):
+                        # numpy array → list
+                        vector = vector.tolist()
+                    elif not isinstance(vector, list):
+                        vector = list(vector)
+
+                    # 🔍 调试日志：显示最终向量信息
+                    if idx == 1:
+                        logger.info(f"[pgvector] 第二个文档向量详情（插入前）:")
+                        logger.info(f"   → 文件路径: {doc.meta_data.get('file_path', 'unknown')}")
+                        logger.info(f"   → 向量类型: {type(vector)}")
+                        logger.info(f"   → 向量长度: {len(vector) if hasattr(vector, '__len__') else 'unknown'}")
+                        logger.info(f"   → 向量前5个值: {vector[:5] if hasattr(vector, '__getitem__') else 'N/A'}")
+
+                    # 插入文档（使用 ::vector 显式类型转换）
+                    try:
+                        cur.execute("""
+                            INSERT INTO document_chunks
+                            (repository_id, chunk_index, file_path, file_type,
+                             content, embedding, token_count, metadata)
+                            VALUES (%s, %s, %s, %s, %s, %s::vector, %s, %s)
+                            RETURNING id
+                        """, (
+                            self.repository_id,
+                            doc.meta_data.get('chunk_index', 0),
+                            doc.meta_data.get('file_path', ''),
+                            doc.meta_data.get('type', ''),
+                            content,  # 使用清理后的内容
+                            vector,  # Python list，会被 ::vector 转换
+                            doc.meta_data.get('token_count', 0),
+                            json.dumps(doc.meta_data)
+                        ))
+                        doc_id = f"pg_{cur.fetchone()[0]}"
+                        document_ids.append(doc_id)
+                    except Exception as e:
+                        logger.error(f"[pgvector] ❌ 文档 {idx} 插入失败")
+                        logger.error(f"   → 文件路径: {doc.meta_data.get('file_path', 'unknown')}")
+                        logger.error(f"   → 错误类型: {type(e).__name__}")
+                        logger.error(f"   → 错误信息: {e}")
+                        logger.error(f"   → 向量类型: {type(vector)}")
+                        logger.error(f"   → 向量长度: {len(vector) if hasattr(vector, '__len__') else 'unknown'}")
+                        logger.error(f"   → 向量前5个值: {vector[:5] if hasattr(vector, '__getitem__') else 'N/A'}")
+                        raise
 
                     if (idx + 1) % 50 == 0:
                         logger.debug(f"[pgvector] 已处理 {idx + 1}/{len(documents)} 个文档")
 
+                # 🔍 调试日志：commit 前的状态
+                logger.info(f"[pgvector] 准备 commit")
+                logger.info(f"   → 已处理文档数: {len(document_ids)}")
+                logger.info(f"   → 跳过文档数: {skipped}")
+                logger.info(f"   → 总文档数: {len(documents)}")
+
                 conn.commit()
 
+                logger.info(f"[pgvector] ✅ commit 成功")
+
         logger.info(f"[pgvector] ✅ 成功添加 {len(document_ids)} 个文档，跳过 {skipped} 个")
+        logger.info("=" * 80)
         return document_ids
 
     def delete_documents(self, document_ids: List[str]) -> int:
@@ -370,9 +531,15 @@ class PgvectorBackend(VectorDBBackend):
         else:
             raise ValueError(f"Unsupported distance metric: {distance_metric}")
 
-        # 构建查询
-        vector_str = str(query_vector)
+        # 🔧 关键修复：确保向量是 Python list 格式
+        vector = query_vector
+        if hasattr(vector, 'tolist'):
+            vector = vector.tolist()
+        elif not isinstance(vector, list):
+            vector = list(vector)
 
+        # 🔧 关键修复：使用 %s::vector 显式类型转换
+        # register_vector() 注册了类型，但 SQL 中仍需显式转换
         sql = f"""
             SELECT id, file_path, content, metadata,
                    1 - (embedding {operator} %s::vector) as similarity
@@ -381,7 +548,7 @@ class PgvectorBackend(VectorDBBackend):
               AND deleted = FALSE
         """
 
-        params = [vector_str, self.repository_id]
+        params = [vector, self.repository_id]
 
         # 添加过滤条件
         if filters:
@@ -397,9 +564,9 @@ class PgvectorBackend(VectorDBBackend):
                     sql += " AND metadata->>%s = %s"
                     params.extend([key, str(value)])
 
-        # 排序并限制结果
+        # 排序并限制结果（同样需要 ::vector 类型转换）
         sql += f" ORDER BY embedding {operator} %s::vector LIMIT %s"
-        params.extend([vector_str, top_k])
+        params.extend([vector, top_k])
 
         # 执行查询
         with self._get_connection() as conn:
@@ -489,10 +656,15 @@ class PgvectorBackend(VectorDBBackend):
                 update_fields = ["content = %s", "metadata = %s"]
                 params = [document.text, json.dumps(document.meta_data)]
 
-                # 如果有向量，也更新
+                # 🔧 关键修复：如果有向量，也更新（使用 ::vector 类型转换）
                 if hasattr(document, 'vector') and document.vector is not None:
                     update_fields.append("embedding = %s::vector")
-                    params.append(str(document.vector))
+                    vector = document.vector
+                    if hasattr(vector, 'tolist'):
+                        vector = vector.tolist()
+                    elif not isinstance(vector, list):
+                        vector = list(vector)
+                    params.append(vector)
 
                 params.append(doc_id)
 

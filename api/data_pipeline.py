@@ -781,11 +781,25 @@ class DatabaseManager:
         # Handle backward compatibility
         if embedder_type is None and is_ollama_embedder is not None:
             embedder_type = 'ollama' if is_ollama_embedder else None
-        
+
+        logger.info("=" * 80)
+        logger.info("🔍 [DEBUG] prepare_database() 开始")
+        logger.info("=" * 80)
+
         self.reset_database()
         self._create_repo(repo_url_or_path, repo_type, access_token)
-        return self.prepare_db_index(embedder_type=embedder_type, excluded_dirs=excluded_dirs, excluded_files=excluded_files,
+
+        result = self.prepare_db_index(embedder_type=embedder_type, excluded_dirs=excluded_dirs, excluded_files=excluded_files,
                                    included_dirs=included_dirs, included_files=included_files)
+
+        logger.info("=" * 80)
+        logger.info("🔍 [DEBUG] prepare_database() 即将返回")
+        logger.info(f"   → 返回文档数: {len(result) if result else 0}")
+        logger.info(f"   → self.use_vector_db: {self.use_vector_db}")
+        logger.info(f"   → self.vector_db: {self.vector_db}")
+        logger.info("=" * 80)
+
+        return result
 
     def reset_database(self):
         """
@@ -867,8 +881,16 @@ class DatabaseManager:
                     vector_db.use_repository(owner=owner, repo=repo, repo_url=repo_url_or_path)
                     logger.info(f"   ✅ 仓库上下文设置成功")
 
+                    # 🔍 调试日志：确认 repository_id 已设置
+                    if hasattr(vector_db, 'repository_id'):
+                        logger.info(f"   → vector_db.repository_id: {vector_db.repository_id}")
+
                 self.vector_db = vector_db
                 self.use_vector_db = True
+
+                # 🔍 调试日志：确认状态已设置
+                logger.info(f"   → self.vector_db: {self.vector_db}")
+                logger.info(f"   → self.use_vector_db: {self.use_vector_db}")
 
                 logger.info(f"🎉 [VECTOR DB] 向量数据库后端初始化完成: {type(vector_db).__name__}")
                 logger.info(f"   → 后端类型: {type(vector_db).__name__}")
@@ -951,17 +973,24 @@ class DatabaseManager:
         ~/.adalflow/repos/{owner}_{repo_name} (for url, local path will be the same)
         ~/.adalflow/databases/{owner}_{repo_name}.pkl
 
+        Git 增量更新支持：
+        - 对于远程仓库：clone 后使用 git pull 获取最新变更
+        - 对于本地路径：如果不是 git 仓库，自动初始化为 git 仓库
+
         Args:
             repo_type(str): Type of repository
             repo_url_or_path (str): The URL or local path of the repository
             access_token (str, optional): Access token for private repositories
         """
         logger.info(f"Preparing repo storage for {repo_url_or_path}...")
+        from api.git_utils import (
+            is_git_repository, initialize_git_repo, pull_latest_changes, commit_uncommitted_changes
+        )
 
         try:
             # Strip whitespace to handle URLs with leading/trailing spaces
             repo_url_or_path = repo_url_or_path.strip()
-            
+
             root_path = get_adalflow_default_root_path()
 
             os.makedirs(root_path, exist_ok=True)
@@ -978,10 +1007,26 @@ class DatabaseManager:
                     # Only download if the repository doesn't exist or is empty
                     download_repo(repo_url_or_path, save_repo_dir, repo_type, access_token)
                 else:
-                    logger.info(f"Repository already exists at {save_repo_dir}. Using existing repository.")
+                    logger.info(f"Repository already exists at {save_repo_dir}. Pulling latest changes...")
+                    # 拉取最新变更
+                    pull_latest_changes(save_repo_dir)
             else:  # local path
                 repo_name = os.path.basename(repo_url_or_path)
                 save_repo_dir = repo_url_or_path
+
+                # 对于本地路径，如果不是 git 仓库则初始化
+                if not is_git_repository(save_repo_dir):
+                    logger.info(f"Local path {save_repo_dir} is not a git repository. Initializing...")
+                    initialize_git_repo(save_repo_dir)
+                else:
+                    logger.info(f"Local path {save_repo_dir} is already a git repository")
+
+                    # ⚠️ 关键修复：自动提交未提交的更改
+                    logger.info(f"Checking for uncommitted changes...")
+                    commit_uncommitted_changes(save_repo_dir)
+
+                    # 尝试拉取最新变更（如果有远程仓库）
+                    pull_latest_changes(save_repo_dir)
 
             save_db_file = os.path.join(root_path, "databases", f"{repo_name}.pkl")
             os.makedirs(save_repo_dir, exist_ok=True)
@@ -1001,11 +1046,18 @@ class DatabaseManager:
             logger.error(f"Failed to create repository structure: {e}")
             raise
 
-    def prepare_db_index(self, embedder_type: str = None, is_ollama_embedder: bool = None, 
+    def prepare_db_index(self, embedder_type: str = None, is_ollama_embedder: bool = None,
                         excluded_dirs: List[str] = None, excluded_files: List[str] = None,
                         included_dirs: List[str] = None, included_files: List[str] = None) -> List[Document]:
         """
-        Prepare the indexed database for the repository.
+        Prepare the indexed database for the repository with git-based incremental updates.
+
+        Git 增量更新逻辑：
+        1. 检查当前 commit hash 和上次保存的 commit hash
+        2. 如果相同，直接加载现有数据库
+        3. 如果不同，检测变更并增量处理：
+           - 删除的文件：从向量数据库中删除
+           - 新增/修改的文件：重新生成向量并添加
 
         Args:
             embedder_type (str, optional): Embedder type to use ('openai', 'google', 'ollama').
@@ -1020,6 +1072,11 @@ class DatabaseManager:
         Returns:
             List[Document]: List of Document objects
         """
+        from api.git_utils import (
+            get_current_commit, load_commit_state, save_commit_state,
+            detect_changes, FileChangeType
+        )
+
         def _embedding_vector_length(doc: Document) -> int:
             vector = getattr(doc, "vector", None)
             if vector is None:
@@ -1039,43 +1096,303 @@ class DatabaseManager:
         if embedder_type is None and is_ollama_embedder is not None:
             embedder_type = 'ollama' if is_ollama_embedder else None
 
-        transformed_docs = None  # 标记是否已加载文档
+        # ========== Git 增量检测 ==========
+        logger.info("=" * 80)
+        logger.info("🔍 [GIT INCREMENTAL] 开始检测代码变更")
 
-        # check the database
-        if self.repo_paths and os.path.exists(self.repo_paths["save_db_file"]):
-            logger.info("Loading existing database...")
+        current_commit = get_current_commit(self.repo_paths["save_repo_dir"])
+
+        # 🔧 关键修复：使用 pgvector 时从数据库读取 commit 状态
+        if self.use_vector_db and self.vector_db and hasattr(self.vector_db, 'get_current_commit'):
+            saved_commit = self.vector_db.get_current_commit()
+            logger.info(f"   → 从 pgvector 数据库读取 commit 状态")
+        else:
+            saved_commit = load_commit_state(self.repo_paths["save_db_file"])
+
+        logger.info(f"   → 当前 commit: {current_commit[:8] if current_commit else 'N/A'}")
+        logger.info(f"   → 保存的 commit: {saved_commit[:8] if saved_commit else 'N/A'}")
+
+        # 如果 commit 相同且数据库存在，直接加载
+        if current_commit and current_commit == saved_commit and os.path.exists(self.repo_paths["save_db_file"]):
+            logger.info("✅ [GIT INCREMENTAL] 代码未变更，直接加载现有数据库")
+            logger.info("=" * 80)
+
+            self.db = LocalDB.load_state(self.repo_paths["save_db_file"])
+            transformed_docs = self.db.get_transformed_data(key="split_and_embed")
+
+            if transformed_docs:
+                logger.info(f"✅ 已加载 {len(transformed_docs)} 个文档（无需重新生成）")
+
+                # 🔧 关键修复：即使 commit 相同，也检查并同步向量数据库
+                if self.use_vector_db and self.vector_db:
+                    try:
+                        logger.info("🧹 [SYNC] 检查向量数据库状态")
+
+                        with self.vector_db._get_connection() as conn:
+                            with conn.cursor() as cur:
+                                # 检查 pgvector 中是否有该仓库的向量
+                                cur.execute("""
+                                    SELECT
+                                        COUNT(*) as total,
+                                        COUNT(DISTINCT file_path) as unique_files
+                                    FROM document_chunks
+                                    WHERE repository_id = %s AND deleted = FALSE
+                                """, (self.vector_db.repository_id,))
+
+                                pgvector_total, pgvector_files = cur.fetchone()
+
+                                logger.info(f"   → pgvector: {pgvector_total} 个向量, {pgvector_files} 个文件")
+                                logger.info(f"   → LocalDB: {len(transformed_docs)} 个文档")
+
+                                # 如果 pgvector 是空的或文件数不匹配，需要同步
+                                if pgvector_total == 0 or pgvector_files == 0:
+                                    logger.info(f"   → pgvector 为空，开始同步 LocalDB 文档...")
+
+                                    # 清理重复向量（如果有）
+                                    cur.execute("""
+                                        SELECT file_path, COUNT(*) as count
+                                        FROM document_chunks
+                                        WHERE repository_id = %s AND deleted = FALSE
+                                        GROUP BY file_path
+                                        HAVING COUNT(*) > 1
+                                    """, (self.vector_db.repository_id,))
+
+                                    duplicates = cur.fetchall()
+
+                                    if duplicates:
+                                        logger.info(f"   → 发现 {len(duplicates)} 个文件有重复向量，先清理")
+                                        for file_path, count in duplicates:
+                                            cur.execute("""
+                                                DELETE FROM document_chunks
+                                                WHERE repository_id = %s AND file_path = %s
+                                            """, (self.vector_db.repository_id, file_path))
+                                        conn.commit()
+
+                                    # 同步所有文档到 pgvector
+                                    logger.info(f"   → 正在同步 {len(transformed_docs)} 个文档到 pgvector")
+                                    doc_ids = self.vector_db.add_documents(transformed_docs)
+                                    logger.info(f"   ✅ 成功同步 {len(doc_ids)} 个文档到 pgvector")
+
+                                    # 更新 commit 状态
+                                    if current_commit:
+                                        self.vector_db.update_current_commit(current_commit)
+                                        logger.info(f"   ✅ 更新 commit 状态: {current_commit[:8]}")
+                                else:
+                                    # pgvector 有数据，只检查和清理重复
+                                    logger.info(f"   → pgvector 有数据，检查重复向量")
+
+                                    cur.execute("""
+                                        SELECT file_path, COUNT(*) as count
+                                        FROM document_chunks
+                                        WHERE repository_id = %s AND deleted = FALSE
+                                        GROUP BY file_path
+                                        HAVING COUNT(*) > 1
+                                    """, (self.vector_db.repository_id,))
+
+                                    duplicates = cur.fetchall()
+
+                                    if duplicates:
+                                        logger.info(f"   → 发现 {len(duplicates)} 个文件有重复向量，开始清理")
+                                        cleaned_count = 0
+                                        for file_path, count in duplicates:
+                                            cur.execute("""
+                                                DELETE FROM document_chunks
+                                                WHERE id IN (
+                                                    SELECT id FROM (
+                                                        SELECT id,
+                                                               ROW_NUMBER() OVER (
+                                                                   PARTITION BY repository_id, file_path, chunk_index
+                                                                   ORDER BY created_at DESC
+                                                               ) as rn
+                                                        FROM document_chunks
+                                                        WHERE repository_id = %s
+                                                          AND file_path = %s
+                                                          AND deleted = FALSE
+                                                    ) sub WHERE rn > 1
+                                                )
+                                            """, (self.vector_db.repository_id, file_path))
+
+                                            deleted = cur.rowcount
+                                            cleaned_count += deleted
+                                            logger.info(f"      - 清理 {file_path}: 删除 {deleted} 个旧版本")
+
+                                        conn.commit()
+                                        logger.info(f"   ✅ 清理完成: 删除了 {cleaned_count} 个重复向量")
+                                    else:
+                                        logger.info(f"   ✅ 没有发现重复向量")
+
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ 向量数据库同步失败: {e}")
+                        import traceback
+                        logger.warning(f"   详细错误: {traceback.format_exc()}")
+
+                return transformed_docs
+            else:
+                logger.warning("⚠️ 数据库存在但无文档，将重新处理")
+
+        # ========== 判断是新建仓库还是已存在仓库 ==========
+        is_new_repository = False
+
+        if self.use_vector_db and self.vector_db and hasattr(self.vector_db, 'count_documents'):
+            try:
+                # 检查数据库中该仓库的文档数量
+                existing_doc_count = self.vector_db.count_documents()
+
+                logger.info("=" * 80)
+                logger.info("🔍 [REPOSITORY CHECK] 检查仓库状态")
+                logger.info(f"   → repository_id: {self.vector_db.repository_id}")
+                logger.info(f"   → 数据库中现有文档数: {existing_doc_count}")
+
+                if existing_doc_count == 0:
+                    is_new_repository = True
+                    logger.info(f"   ✅ 判断为: 新建仓库（数据库无文档）")
+                    logger.info(f"   → 将执行全量处理")
+                else:
+                    is_new_repository = False
+                    logger.info(f"   ✅ 判断为: 已存在仓库（数据库有 {existing_doc_count} 个文档）")
+                    logger.info(f"   → 将执行增量更新")
+
+                logger.info("=" * 80)
+
+            except Exception as e:
+                logger.warning(f"   ⚠️ 无法检查仓库状态: {e}")
+                # 如果无法检查，默认作为已存在仓库处理（使用增量更新）
+                is_new_repository = False
+        else:
+            # 不使用向量数据库时，使用 commit 判断
+            is_new_repository = (saved_commit is None or saved_commit == 'N/A')
+
+        # ========== 检测 git 变更 ==========
+        git_changes = detect_changes(self.repo_paths["save_repo_dir"], previous_hash=saved_commit)
+
+        if git_changes.is_initial:
+            logger.info("🆕 [GIT INCREMENTAL] Git 检测为首次处理")
+        elif is_new_repository:
+            logger.info("🆕 [REPOSITORY] 数据库判断为新建仓库")
+        else:
+            logger.info(f"📝 [GIT INCREMENTAL] 检测到 {len(git_changes.changes)} 个文件变更")
+
+        # ========== 准备文档列表 ==========
+        transformed_docs = None
+
+        # 🔧 关键判断：新建仓库或 Git 首次处理 → 全量处理
+        # 检查本地数据库是否存在（已存在仓库的增量更新）
+        if (is_new_repository or git_changes.is_initial):
+            # 新建仓库：直接跳到全量处理
+            logger.info("⏭️  跳过增量更新逻辑，直接进入全量处理")
+            transformed_docs = None
+        elif os.path.exists(self.repo_paths["save_db_file"]):
             try:
                 self.db = LocalDB.load_state(self.repo_paths["save_db_file"])
-                documents = self.db.get_transformed_data(key="split_and_embed")
-                if documents:
-                    lengths = [_embedding_vector_length(doc) for doc in documents]
-                    non_empty = sum(1 for n in lengths if n > 0)
-                    empty = len(lengths) - non_empty
-                    sample_sizes = sorted({n for n in lengths if n > 0})[:3]
-                    logger.info(
-                        "Loaded %s documents from existing database (embeddings: %s non-empty, %s empty; sample_dims=%s)",
-                        len(documents),
-                        non_empty,
-                        empty,
-                        sample_sizes,
-                    )
+                existing_docs = self.db.get_transformed_data(key="split_and_embed")
 
-                    if non_empty == 0:
-                        logger.warning(
-                            "Existing database contains no usable embeddings. Rebuilding embeddings..."
+                if existing_docs:
+                    logger.info(f"📦 加载现有数据库: {len(existing_docs)} 个文档")
+
+                    # 🔍 调试日志：显示现有数据库中的文件
+                    logger.info(f"   📄 现有数据库中的文件:")
+                    for doc in existing_docs:
+                        file_path = doc.meta_data.get('file_path', 'unknown')
+                        logger.info(f"      - {file_path}")
+
+                    # 创建现有文档的 file_path 集合
+                    existing_file_paths = {
+                        doc.meta_data.get('file_path') for doc in existing_docs
+                        if doc.meta_data and 'file_path' in doc.meta_data
+                    }
+
+                    # 找出需要重新处理的文件（新增或修改）
+                    files_to_reprocess = set()
+                    for change in git_changes.changes:
+                        if change.change_type in [FileChangeType.ADDED, FileChangeType.MODIFIED]:
+                            files_to_reprocess.add(change.file_path)
+
+                    # 移除已删除和重命名的文件
+                    files_to_remove = set()
+                    for change in git_changes.changes:
+                        if change.change_type == FileChangeType.DELETED:
+                            files_to_remove.add(change.file_path)
+                        elif change.change_type == FileChangeType.RENAMED and change.old_path:
+                            files_to_remove.add(change.old_path)
+
+                    # 过滤掉需要移除的文档
+                    if files_to_remove:
+                        filtered_docs = [
+                            doc for doc in existing_docs
+                            if doc.meta_data.get('file_path') not in files_to_remove
+                        ]
+                        logger.info(f"   → 过滤掉 {len(existing_docs) - len(filtered_docs)} 个已删除文件的文档")
+                        existing_docs = filtered_docs
+
+                    # 如果有文件需要重新处理
+                    if files_to_reprocess:
+                        logger.info(f"🔄 重新处理 {len(files_to_reprocess)} 个变更的文件")
+                        logger.info(f"   → 文件列表: {list(files_to_reprocess)[:10]}...")
+
+                        # 重新读取这些文件并生成向量
+                        new_documents = read_all_documents(
+                            self.repo_paths["save_repo_dir"],
+                            embedder_type=embedder_type,
+                            excluded_dirs=excluded_dirs,
+                            excluded_files=excluded_files,
+                            included_dirs=included_dirs,
+                            included_files=included_files
                         )
-                    else:
-                        # ✅ 加载现有数据库成功，保存文档引用
-                        transformed_docs = documents
-                        logger.info(f"✅ 已加载 {len(transformed_docs)} 个文档，将保存到向量数据库")
-            except Exception as e:
-                logger.error(f"Error loading existing database: {e}")
-                # Continue to create a new database
 
-        # 如果没有加载现有数据库，则创建新数据库
+                        # 🔍 调试日志：显示所有读取到的文件
+                        logger.info(f"   📄 读取到 {len(new_documents)} 个文件:")
+                        for doc in new_documents:
+                            file_path = doc.meta_data.get('file_path', 'unknown')
+                            is_changed = file_path in files_to_reprocess
+                            status = "✅ 变更" if is_changed else "⏩ 未变更"
+                            logger.info(f"      {status} - {file_path}")
+
+                        # 只保留需要重新处理的文件
+                        reprocess_documents = [
+                            doc for doc in new_documents
+                            if doc.meta_data.get('file_path') in files_to_reprocess
+                        ]
+
+                        if reprocess_documents:
+                            logger.info(f"   → 找到 {len(reprocess_documents)} 个需要重新处理的文档")
+
+                            # 生成向量
+                            repo_name = os.path.basename(self.repo_paths["save_db_file"]).replace('.pkl', '')
+                            data_transformer = prepare_data_pipeline(embedder_type, is_ollama_embedder, repo_name)
+                            reprocessed_docs = data_transformer(reprocess_documents)
+
+                            # 🔧 关键修复：合并文档时移除旧版本，避免重复
+                            # 创建文件路径到新文档的映射
+                            reprocessed_file_paths = {
+                                doc.meta_data.get('file_path') for doc in reprocessed_docs
+                                if doc.meta_data and 'file_path' in doc.meta_data
+                            }
+
+                            # 只保留未重新处理的旧文档 + 新处理的文档
+                            filtered_existing_docs = [
+                                doc for doc in existing_docs
+                                if doc.meta_data.get('file_path') not in reprocessed_file_paths
+                            ]
+
+                            # 合并文档
+                            transformed_docs = filtered_existing_docs + reprocessed_docs
+                            logger.info(f"   → 合并后文档总数: {len(transformed_docs)} (保留旧文档 {len(filtered_existing_docs)} + 新文档 {len(reprocessed_docs)})")
+                        else:
+                            transformed_docs = existing_docs
+                    else:
+                        # 没有文件需要重新处理，直接使用现有文档
+                        transformed_docs = existing_docs
+                        logger.info(f"✅ 无需重新处理，使用现有 {len(transformed_docs)} 个文档")
+
+            except Exception as e:
+                logger.error(f"❌ 加载现有数据库失败: {e}")
+                logger.info("   → 将执行全量重建")
+                transformed_docs = None
+
+        # ========== 全量处理（首次或失败时） ==========
         if transformed_docs is None:
-            # prepare the database
-            logger.info("Creating new database...")
+            logger.info("🔄 [FULL BUILD] 执行全量文档处理")
+
             documents = read_all_documents(
                 self.repo_paths["save_repo_dir"],
                 embedder_type=embedder_type,
@@ -1084,28 +1401,115 @@ class DatabaseManager:
                 included_dirs=included_dirs,
                 included_files=included_files
             )
+
+            logger.info(f"   → 读取到 {len(documents)} 个文档")
+
+            # 🔍 调试日志：显示所有文件
+            logger.info(f"   📄 文件列表:")
+            for doc in documents:
+                file_path = doc.meta_data.get('file_path', 'unknown')
+                file_type = doc.meta_data.get('type', 'unknown')
+                is_code = doc.meta_data.get('is_code', False)
+                code_str = "代码" if is_code else "文档"
+                logger.info(f"      - [{code_str}] {file_path} (type: {file_type})")
+
             # Extract repo name from db file path for cache isolation
             repo_name = os.path.basename(self.repo_paths["save_db_file"]).replace('.pkl', '')
             self.db = transform_documents_and_save_to_db(
                 documents, self.repo_paths["save_db_file"], embedder_type=embedder_type, repo_name=repo_name
             )
-            logger.info(f"Total documents: {len(documents)}")
-            transformed_docs = self.db.get_transformed_data(key="split_and_embed")
-            logger.info(f"Total transformed documents: {len(transformed_docs)}")
 
-        # If vector database backend is enabled, also save to vector DB
-        if self.use_vector_db and self.vector_db and transformed_docs:
+            logger.info(f"   → 生成向量并保存到数据库")
+            transformed_docs = self.db.get_transformed_data(key="split_and_embed")
+            logger.info(f"✅ 全量处理完成: {len(transformed_docs)} 个文档")
+
+        # ========== 保存当前 commit 状态 ==========
+        if current_commit:
+            # 🔧 关键修复：使用 pgvector 时保存到数据库
+            if self.use_vector_db and self.vector_db and hasattr(self.vector_db, 'update_current_commit'):
+                self.vector_db.update_current_commit(current_commit)
+                logger.info(f"💾 [PGVECTOR] 保存 commit 状态到数据库: {current_commit[:8]}")
+            else:
+                save_commit_state(self.repo_paths["save_db_file"], current_commit)
+                logger.debug(f"💾 保存 commit 状态到文件: {current_commit[:8]}")
+
+        # ========== 向量数据库增量更新 ==========
+        # 🔍 调试日志：检查向量保存条件
+        logger.info("=" * 80)
+        logger.info("🔍 [DEBUG] 检查向量数据库保存条件")
+        logger.info(f"   → self.use_vector_db: {self.use_vector_db}")
+        logger.info(f"   → self.vector_db: {self.vector_db}")
+        logger.info(f"   → vector_db 类型: {type(self.vector_db).__name__ if self.vector_db else 'None'}")
+        logger.info(f"   → transformed_docs 数量: {len(transformed_docs) if transformed_docs else 0}")
+        logger.info(f"   → transformed_docs 是否为 None: {transformed_docs is None}")
+
+        # 检查第一个文档的向量状态
+        if transformed_docs and len(transformed_docs) > 0:
+            first_doc = transformed_docs[0]
+            logger.info(f"   → 第一个文档有向量属性: {hasattr(first_doc, 'vector')}")
+            if hasattr(first_doc, 'vector'):
+                logger.info(f"   → 第一个文档向量值: {first_doc.vector}")
+                logger.info(f"   → 第一个文档向量类型: {type(first_doc.vector)}")
+                if first_doc.vector is not None and hasattr(first_doc.vector, '__len__'):
+                    logger.info(f"   → 第一个文档向量长度: {len(first_doc.vector)}")
+
+        all_conditions_met = self.use_vector_db and self.vector_db and transformed_docs
+        logger.info(f"   → 所有条件是否满足: {all_conditions_met}")
+        logger.info("=" * 80)
+
+        if all_conditions_met:
             try:
                 logger.info("=" * 80)
-                logger.info("💾 [VECTOR DB] 正在保存文档到向量数据库")
-                logger.info(f"   → 文档数量: {len(transformed_docs)}")
-                logger.info(f"   → 向量数据库类型: {type(self.vector_db).__name__}")
+                logger.info("💾 [VECTOR DB] 保存文档到向量数据库")
 
-                logger.info(f"   → 正在调用 add_documents()...")
-                doc_ids = self.vector_db.add_documents(transformed_docs)
+                # 🔧 关键修复：使用 is_new_repository 判断，而不是 git_changes.is_initial
+                # 因为 git_changes.is_initial 只是判断是否有 previous_hash，不代表数据库中是否有数据
+                if not is_new_repository and not git_changes.is_initial and git_changes.changes:
+                    # 增量更新：先删除变更文件的旧向量，再添加新向量
+                    logger.info(f"   → 增量更新模式（已存在仓库）")
 
-                logger.info(f"   ✅ 成功保存 {len(doc_ids)} 个文档到向量数据库")
-                logger.info(f"   → 文档 IDs (前5个): {doc_ids[:5] if len(doc_ids) > 5 else doc_ids}")
+                    # 🔧 关键修复：先删除变更文件的所有向量，避免重复
+                    modified_files = set()
+                    deleted_files = set()
+
+                    for change in git_changes.changes:
+                        if change.change_type in [FileChangeType.MODIFIED, FileChangeType.ADDED]:
+                            modified_files.add(change.file_path)
+                        elif change.change_type == FileChangeType.DELETED:
+                            deleted_files.add(change.file_path)
+
+                    # 删除所有变更文件的向量
+                    all_changed_files = modified_files | deleted_files
+                    if all_changed_files:
+                        logger.info(f"   → 删除 {len(all_changed_files)} 个变更文件的旧向量")
+                        for file_path in all_changed_files:
+                            count = self.vector_db.delete_by_metadata("file_path", file_path)
+                            logger.debug(f"      - 删除 {file_path}: {count} 个文档")
+
+                    # 找出需要重新添加的文档（新增或修改的文件）
+                    new_docs = []
+                    for file_path in modified_files:
+                        matching_docs = [
+                            doc for doc in transformed_docs
+                            if doc.meta_data.get('file_path') == file_path
+                        ]
+                        new_docs.extend(matching_docs)
+
+                    if new_docs:
+                        logger.info(f"   → 添加 {len(new_docs)} 个新文档")
+                        doc_ids = self.vector_db.add_documents(new_docs)
+                        logger.info(f"   ✅ 成功添加 {len(doc_ids)} 个文档")
+                    else:
+                        logger.info(f"   → 无新文档需要添加")
+                else:
+                    # 全量更新（新建仓库或 Git 首次处理）
+                    if is_new_repository:
+                        logger.info(f"   → 全量更新模式（新建仓库）: {len(transformed_docs)} 个文档")
+                    else:
+                        logger.info(f"   → 全量更新模式（Git 首次处理）: {len(transformed_docs)} 个文档")
+
+                    doc_ids = self.vector_db.add_documents(transformed_docs)
+                    logger.info(f"   ✅ 成功保存 {len(doc_ids)} 个文档")
 
                 # 验证保存
                 if hasattr(self.vector_db, 'count_documents'):
@@ -1121,7 +1525,57 @@ class DatabaseManager:
                 import traceback
                 logger.error(f"   → 详细错误:\n{traceback.format_exc()}")
                 logger.info("   → 将继续使用传统 LocalDB")
-                # Continue without vector DB
+
+        logger.info("=" * 80)
+        logger.info("✅ [GIT INCREMENTAL] Wiki 刷新完成")
+        logger.info("=" * 80)
+
+        # 🔧 关键修复：最终检查向量是否已保存到数据库
+        if self.use_vector_db and self.vector_db and transformed_docs:
+            logger.info("=" * 80)
+            logger.info("🔍 [FINAL CHECK] 最终向量数据库检查")
+
+            try:
+                # 检查数据库中的文档数量
+                if hasattr(self.vector_db, 'count_documents'):
+                    db_count = self.vector_db.count_documents()
+                    logger.info(f"   → 数据库中当前文档数: {db_count}")
+                    logger.info(f"   → 内存中文档数: {len(transformed_docs)}")
+
+                    # 如果数据库为空但内存有数据，说明保存失败了，需要重新保存
+                    if db_count == 0 and len(transformed_docs) > 0:
+                        logger.warning("   ⚠️ 数据库为空但内存有文档，尝试重新保存...")
+
+                        # 检查第一个文档是否有向量
+                        first_doc_has_vector = (
+                            len(transformed_docs) > 0 and
+                            hasattr(transformed_docs[0], 'vector') and
+                            transformed_docs[0].vector is not None
+                        )
+
+                        logger.info(f"   → 第一个文档有向量: {first_doc_has_vector}")
+
+                        if first_doc_has_vector:
+                            logger.info(f"   → 正在保存 {len(transformed_docs)} 个文档到数据库...")
+                            doc_ids = self.vector_db.add_documents(transformed_docs)
+                            logger.info(f"   ✅ 成功保存 {len(doc_ids)} 个文档")
+
+                            # 再次验证
+                            db_count = self.vector_db.count_documents()
+                            logger.info(f"   ✅ 验证: 数据库中现在有 {db_count} 个文档")
+                        else:
+                            logger.error("   ❌ 文档没有向量，无法保存到数据库")
+                    elif db_count > 0:
+                        logger.info(f"   ✅ 数据库已有文档，无需重新保存")
+                    else:
+                        logger.warning(f"   ⚠️ 内存和数据库都为空")
+
+            except Exception as e:
+                logger.error(f"   ❌ 最终检查失败: {e}")
+                import traceback
+                logger.error(f"   详细错误: {traceback.format_exc()}")
+
+            logger.info("=" * 80)
 
         return transformed_docs
 

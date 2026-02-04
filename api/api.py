@@ -510,7 +510,7 @@ async def delete_wiki_cache(
     authorization_code: Optional[str] = Query(None, description="Authorization code")
 ):
     """
-    Deletes a specific wiki cache from the file system.
+    Deletes a specific wiki cache from the file system and pgvector database.
     """
     # Language validation
     supported_langs = configs["lang_config"]["supported_languages"]
@@ -525,17 +525,242 @@ async def delete_wiki_cache(
     logger.info(f"Attempting to delete wiki cache for {owner}/{repo} ({repo_type}), lang: {language}")
     cache_path = get_wiki_cache_path(owner, repo, repo_type, language)
 
+    cache_deleted = False
     if os.path.exists(cache_path):
         try:
             os.remove(cache_path)
+            cache_deleted = True
             logger.info(f"Successfully deleted wiki cache: {cache_path}")
-            return {"message": f"Wiki cache for {owner}/{repo} ({language}) deleted successfully"}
         except Exception as e:
             logger.error(f"Error deleting wiki cache {cache_path}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to delete wiki cache: {str(e)}")
     else:
-        logger.warning(f"Wiki cache not found, cannot delete: {cache_path}")
-        raise HTTPException(status_code=404, detail="Wiki cache not found")
+        logger.warning(f"Wiki cache not found: {cache_path}")
+
+    # 🔧 关键修复：删除 pgvector 数据库中的记录
+    db_deleted = False
+    db_error = None
+
+    try:
+        # 检查是否使用 pgvector
+        vector_db_backend = os.getenv("VECTOR_DB_BACKEND", "faiss")
+
+        if vector_db_backend == "pgvector":
+            logger.info(f"Deleting repository {owner}/{repo} from pgvector database")
+
+            try:
+                from api.vector_db import get_vector_db
+
+                vector_db = get_vector_db()
+
+                if vector_db and hasattr(vector_db, '_get_connection'):
+                    with vector_db._get_connection() as conn:
+                        with conn.cursor() as cur:
+                            # 先查询 repository 记录是否存在
+                            cur.execute(
+                                "SELECT id FROM repositories WHERE owner = %s AND repo = %s",
+                                (owner, repo)
+                            )
+                            repo_record = cur.fetchone()
+
+                            if repo_record:
+                                repository_id = repo_record[0]
+
+                                # 查询关联的文档数量
+                                cur.execute(
+                                    "SELECT COUNT(*) FROM document_chunks WHERE repository_id = %s AND deleted = FALSE",
+                                    (repository_id,)
+                                )
+                                doc_count = cur.fetchone()[0]
+
+                                logger.info(f"Found repository {owner}/{repo} (ID={repository_id}) with {doc_count} documents")
+
+                                # 删除 repository 记录（document_chunks 会通过 ON DELETE CASCADE 自动删除）
+                                cur.execute(
+                                    "DELETE FROM repositories WHERE owner = %s AND repo = %s",
+                                    (owner, repo)
+                                )
+                                deleted_count = cur.rowcount
+                                conn.commit()
+
+                                logger.info(f"✅ Deleted repository {owner}/{repo} and {doc_count} associated documents from pgvector")
+                                db_deleted = True
+                            else:
+                                logger.warning(f"Repository {owner}/{repo} not found in pgvector database")
+
+                    # 删除 LocalDB 文件
+                    root_path = get_adalflow_default_root_path()
+                    repo_name = f"{owner}_{repo}"
+                    db_file = os.path.join(root_path, "databases", f"{repo_name}.pkl")
+
+                    if os.path.exists(db_file):
+                        os.remove(db_file)
+                        logger.info(f"✅ Deleted LocalDB file: {db_file}")
+
+            except ImportError as e:
+                logger.warning(f"Failed to import vector_db module: {e}")
+                db_error = str(e)
+            except Exception as e:
+                logger.error(f"Failed to delete from pgvector: {e}")
+                db_error = str(e)
+        else:
+            logger.info(f"Not using pgvector backend (VECTOR_DB_BACKEND={vector_db_backend}), skipping database deletion")
+
+    except Exception as e:
+        logger.error(f"Unexpected error during database deletion: {e}")
+        db_error = str(e)
+
+    # 构建返回消息
+    messages = []
+    if cache_deleted:
+        messages.append(f"Wiki cache for {owner}/{repo} ({language}) deleted successfully")
+    else:
+        messages.append(f"Wiki cache not found for {owner}/{repo} ({language})")
+
+    if db_deleted:
+        messages.append(f"Database records deleted successfully")
+    elif db_error:
+        messages.append(f"Database deletion failed: {db_error}")
+    else:
+        messages.append(f"No database records to delete (not using pgvector)")
+
+    return {"message": "; ".join(messages)}
+
+@app.post("/api/wiki/cleanup")
+async def cleanup_orphan_repositories(
+    authorization_code: Optional[str] = Query(None, description="Authorization code")
+):
+    """
+    清理 pgvector 数据库中不存在于文件系统的孤儿仓库记录。
+    这会删除所有在缓存目录中找不到的仓库及其关联的向量数据。
+    """
+    # 验证权限（如果启用了认证）
+    if WIKI_AUTH_MODE:
+        logger.info("Checking authorization code for cleanup operation")
+        if not authorization_code or WIKI_AUTH_CODE != authorization_code:
+            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+
+    logger.info("=" * 80)
+    logger.info("🧹 [CLEANUP] Starting orphan repository cleanup")
+
+    try:
+        # 检查是否使用 pgvector
+        vector_db_backend = os.getenv("VECTOR_DB_BACKEND", "faiss")
+
+        if vector_db_backend != "pgvector":
+            logger.info(f"Not using pgvector backend (VECTOR_DB_BACKEND={vector_db_backend})")
+            return {
+                "message": "Cleanup not required (not using pgvector backend)",
+                "deleted_repositories": 0,
+                "deleted_documents": 0
+            }
+
+        # 1. 获取文件系统中所有的项目
+        logger.info(f"Scanning cache directory: {WIKI_CACHE_DIR}")
+
+        if not os.path.exists(WIKI_CACHE_DIR):
+            logger.warning(f"Cache directory not found: {WIKI_CACHE_DIR}")
+            return {
+                "message": "Cache directory not found",
+                "deleted_repositories": 0,
+                "deleted_documents": 0
+            }
+
+        cache_projects = set()
+        try:
+            filenames = await asyncio.to_thread(os.listdir, WIKI_CACHE_DIR)
+
+            for filename in filenames:
+                if filename.startswith("deepwiki_cache_") and filename.endswith(".json"):
+                    parts = filename.replace("deepwiki_cache_", "").replace(".json", "").split('_')
+                    if len(parts) >= 4:
+                        owner = parts[1]
+                        repo = "_".join(parts[2:-1])
+                        cache_projects.add(f"{owner}/{repo}")
+
+            logger.info(f"Found {len(cache_projects)} projects in filesystem")
+
+        except Exception as e:
+            logger.error(f"Failed to scan cache directory: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to scan cache directory: {str(e)}")
+
+        # 2. 删除不在文件系统中的仓库
+        try:
+            from api.vector_db import get_vector_db
+
+            vector_db = get_vector_db()
+
+            if not vector_db or not hasattr(vector_db, '_get_connection'):
+                raise HTTPException(status_code=500, detail="Vector database not available")
+
+            with vector_db._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # 查询所有仓库
+                    cur.execute("SELECT id, owner, repo FROM repositories")
+                    all_repos = cur.fetchall()
+
+                    logger.info(f"Found {len(all_repos)} repositories in database")
+
+                    deleted_repos = 0
+                    deleted_docs = 0
+
+                    for repo_id, owner, repo in all_repos:
+                        repo_key = f"{owner}/{repo}"
+
+                        if repo_key not in cache_projects:
+                            # 这是一个孤儿记录，需要删除
+                            logger.info(f"🗑️  Found orphan repository: {repo_key} (ID={repo_id})")
+
+                            # 先查询关联的文档数量
+                            cur.execute(
+                                "SELECT COUNT(*) FROM document_chunks WHERE repository_id = %s AND deleted = FALSE",
+                                (repo_id,)
+                            )
+                            doc_count = cur.fetchone()[0]
+
+                            # 删除 repository 记录（document_chunks 会通过 ON DELETE CASCADE 自动删除）
+                            cur.execute(
+                                "DELETE FROM repositories WHERE id = %s",
+                                (repo_id,)
+                            )
+
+                            deleted_repos += 1
+                            deleted_docs += doc_count
+
+                            # 删除 LocalDB 文件
+                            try:
+                                root_path = get_adalflow_default_root_path()
+                                db_file = os.path.join(root_path, "databases", f"{owner}_{repo}.pkl")
+                                if os.path.exists(db_file):
+                                    os.remove(db_file)
+                                    logger.info(f"   ✅ Deleted LocalDB file: {db_file}")
+                            except Exception as e:
+                                logger.warning(f"   ⚠️ Failed to delete LocalDB file: {e}")
+
+                    if deleted_repos > 0:
+                        conn.commit()
+                        logger.info(f"✅ Cleanup completed: deleted {deleted_repos} orphan repositories and {deleted_docs} documents")
+                    else:
+                        logger.info("✅ No orphan repositories found, database is clean")
+
+            return {
+                "message": f"Cleanup completed successfully",
+                "deleted_repositories": deleted_repos,
+                "deleted_documents": deleted_docs,
+                "details": f"Deleted {deleted_repos} orphan repositories and {deleted_docs} associated documents"
+            }
+
+        except ImportError as e:
+            logger.error(f"Failed to import vector_db module: {e}")
+            raise HTTPException(status_code=500, detail=f"Vector database module not available: {str(e)}")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Cleanup failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+    finally:
+        logger.info("=" * 80)
 
 @app.get("/health")
 async def health_check():

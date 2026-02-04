@@ -99,7 +99,17 @@ class OllamaDocumentProcessor(DataComponent):
                     logger.warning(f"Failed to get embedding for document '{file_path}', skipping")
             except Exception as e:
                 file_path = getattr(doc, 'meta_data', {}).get('file_path', f'document_{i}')
-                logger.error(f"Error processing document '{file_path}': {e}, skipping")
+                # 记录向量生成失败的详细参数和原因
+                logger.error("=" * 80)
+                logger.error(f"❌ [向量生成失败] Ollama 嵌入生成错误")
+                logger.error(f"   📄 文件路径: {file_path}")
+                logger.error(f"   📝 文本长度: {len(doc.text)} 字符")
+                logger.error(f"   📝 文本预览: {doc.text[:200]}...")
+                logger.error(f"   🔧 嵌入器类型: {type(self.embedder).__name__}")
+                logger.error(f"   ❌ 错误类型: {type(e).__name__}")
+                logger.error(f"   ❌ 错误信息: {str(e)}")
+                logger.error(f"   📋 文档元数据: {doc.meta_data}")
+                logger.error("=" * 80)
 
         logger.info(f"Successfully processed {len(successful_docs)}/{len(output)} documents with consistent embeddings")
         return successful_docs

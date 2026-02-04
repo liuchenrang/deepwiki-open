@@ -69,3 +69,9 @@ next-env.d.ts
 certs/
 docs/
 examples/
+
+# Temporary files and scripts
+tmp/
+*.tmp
+temp/
+

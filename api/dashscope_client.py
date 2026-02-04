@@ -759,14 +759,56 @@ class DashScopeBatchEmbedder(DataComponent):
         Returns:
             Batch embedding output
         """
-        # Check cache first
-        
+        # Check cache first (with validation)
+
         if not force_recreate and os.path.exists(self.cache_path):
             try:
                 with open(self.cache_path, 'rb') as f:
                     embeddings = pickle.load(f)
-                    log.info(f"Loaded cached DashScope embeddings from: {self.cache_path}")
-                return embeddings
+
+                # 🔧 关键修复：验证缓存的完整性
+                # 只有当缓存中的所有向量都有效时才使用缓存
+                cache_is_valid = True
+                validation_errors = []
+
+                for batch_idx, batch_output in enumerate(embeddings):
+                    # 检查批次是否有错误
+                    if batch_output.error:
+                        cache_is_valid = False
+                        validation_errors.append(f"批次 {batch_idx} 有错误标记")
+                        continue
+
+                    # 检查批次是否有数据
+                    if not batch_output.data or len(batch_output.data) == 0:
+                        cache_is_valid = False
+                        validation_errors.append(f"批次 {batch_idx} 没有数据")
+                        continue
+
+                    # 检查是否有空向量
+                    for emb_idx, embedding in enumerate(batch_output.data):
+                        if hasattr(embedding, 'embedding') and not embedding.embedding:
+                            cache_is_valid = False
+                            validation_errors.append(f"批次 {batch_idx} 向量 {emb_idx} 为空")
+                            break
+
+                if cache_is_valid:
+                    log.info(f"✅ Loaded cached DashScope embeddings from: {self.cache_path}")
+                    log.info(f"   📊 缓存包含 {len(embeddings)} 个批次，所有向量均有效")
+                    return embeddings
+                else:
+                    log.warning("=" * 80)
+                    log.warning(f"⚠️  缓存完整性验证失败，将重新生成向量")
+                    log.warning(f"   📁 缓存文件: {self.cache_path}")
+                    log.warning(f"   📝 验证错误:")
+                    for error in validation_errors[:5]:  # 只显示前5个错误
+                        log.warning(f"      - {error}")
+                    if len(validation_errors) > 5:
+                        log.warning(f"      ... 还有 {len(validation_errors) - 5} 个错误")
+                    log.warning(f"   💡 建议删除缓存文件: {self.cache_path}")
+                    log.warning("=" * 80)
+                    # 强制重新生成
+                    force_recreate = True
+
             except Exception as e:
                 log.warning(f"Failed to load cache file {self.cache_path}: {e}, proceeding with fresh embedding")
         
@@ -801,7 +843,22 @@ class DashScopeBatchEmbedder(DataComponent):
                     log.warning(f"Batch {i//self.batch_size + 1} returned no embedding data")
                     
             except Exception as e:
-                log.error(f"Batch {i//self.batch_size + 1} processing exception: {e}")
+                # 记录批次向量生成失败的详细参数和原因
+                log.error("=" * 80)
+                log.error(f"❌ [向量生成失败] DashScope 批次嵌入生成错误")
+                log.error(f"   🔢 批次编号: {i//self.batch_size + 1}")
+                log.error(f"   📊 批次大小: {len(batch_input)}")
+                log.error(f"   📝 输入文本总数: {n}")
+                log.error(f"   🔧 嵌入器类型: {type(self.embedder).__name__}")
+                log.error(f"   ❌ 错误类型: {type(e).__name__}")
+                log.error(f"   ❌ 错误信息: {str(e)}")
+                log.error(f"   📋 批次输入预览:")
+                for idx, text in enumerate(batch_input[:3]):  # 只显示前3个文本
+                    log.error(f"      [{idx}] 长度={len(text)}, 内容={text[:100]}...")
+                if len(batch_input) > 3:
+                    log.error(f"      ... (还有 {len(batch_input) - 3} 个文本)")
+                log.error(f"   📋 模型参数: {model_kwargs}")
+                log.error("=" * 80)
                 # Create error embedding output
                 error_output = EmbedderOutput(
                     data=[],
@@ -811,16 +868,53 @@ class DashScopeBatchEmbedder(DataComponent):
                 embeddings.append(error_output)
         
         log.info(f"DashScope batch embedding completed, processed {len(embeddings)} batches")
-        
-        # Save to cache
-        try:
-            if not os.path.exists('./embedding_cache'):
-                os.makedirs('./embedding_cache')
-            with open(self.cache_path, 'wb') as f:
-                pickle.dump(embeddings, f)
-                log.info(f"Saved DashScope embeddings cache to: {self.cache_path}")
-        except Exception as e:
-            log.warning(f"Failed to save cache to {self.cache_path}: {e}")
+
+        # 🔧 关键修复：验证所有向量都有效后才保存缓存
+        # 只有当所有批次都成功且没有空向量时才保存缓存
+        should_save_cache = True
+        cache_validation_errors = []
+
+        for batch_idx, batch_output in enumerate(embeddings):
+            # 检查批次是否有错误
+            if batch_output.error:
+                should_save_cache = False
+                cache_validation_errors.append(f"批次 {batch_idx} 有错误: {batch_output.error}")
+                continue
+
+            # 检查批次是否有数据
+            if not batch_output.data or len(batch_output.data) == 0:
+                should_save_cache = False
+                cache_validation_errors.append(f"批次 {batch_idx} 没有数据")
+                continue
+
+            # 检查是否有空向量
+            for emb_idx, embedding in enumerate(batch_output.data):
+                if hasattr(embedding, 'embedding') and not embedding.embedding:
+                    should_save_cache = False
+                    cache_validation_errors.append(f"批次 {batch_idx} 向量 {emb_idx} 为空")
+                    break
+
+        # Save to cache (only if all embeddings are valid)
+        if should_save_cache:
+            try:
+                if not os.path.exists('./embedding_cache'):
+                    os.makedirs('./embedding_cache')
+                with open(self.cache_path, 'wb') as f:
+                    pickle.dump(embeddings, f)
+                log.info(f"✅ Saved DashScope embeddings cache to: {self.cache_path}")
+                log.info(f"   📊 缓存了 {len(embeddings)} 个批次，所有向量均有效")
+            except Exception as e:
+                log.warning(f"Failed to save cache to {self.cache_path}: {e}")
+        else:
+            log.warning("=" * 80)
+            log.warning(f"⚠️  缓存验证失败，不保存缓存以避免使用不完整数据")
+            log.warning(f"   📝 验证错误:")
+            for error in cache_validation_errors[:5]:  # 只显示前5个错误
+                log.warning(f"      - {error}")
+            if len(cache_validation_errors) > 5:
+                log.warning(f"      ... 还有 {len(cache_validation_errors) - 5} 个错误")
+            log.warning(f"   💡 下次将重新生成所有向量")
+            log.warning("=" * 80)
         
         return embeddings
     
@@ -876,17 +970,46 @@ class DashScopeToEmbeddings(DataComponent):
                 total_embeddings += len(batch_output.data)
             
         log.info(f"Embedding statistics: total {total_embeddings} valid embeddings, {error_batches} error batches")
+
+        # 🔧 关键修复：如果有错误批次或空向量，发出警告
+        if error_batches > 0:
+            log.error("=" * 80)
+            log.error(f"⚠️  检测到 {error_batches} 个批次生成失败")
+            log.error(f"   📊 总批次数: {len(outputs)}")
+            log.error(f"   📈 失败比例: {error_batches/len(outputs)*100:.1f}%")
+            log.error(f"   ❌ 这些文档的向量将为空，无法用于搜索")
+            log.error(f"   💡 建议:")
+            log.error(f"      1. 检查 API 配置和密钥")
+            log.error(f"      2. 查看上方日志中的详细错误信息")
+            log.error(f"      3. 删除缓存文件后重试: rm -rf {self.batch_embedder.cache_path}")
+            log.error("=" * 80)
         
         # Assign embedding vectors back to documents
         doc_idx = 0
         for batch_idx, batch_output in tqdm(
-            enumerate(outputs), 
+            enumerate(outputs),
             desc="Assigning embedding vectors to documents",
             disable=False
         ):
             if batch_output.error:
                 # Create empty vectors for documents in error batches
                 batch_size_actual = min(self.batch_size, len(output) - doc_idx)
+                # 记录空向量创建的详细信息
+                log.error("=" * 80)
+                log.error(f"❌ [向量生成失败] DashScope 批次 {batch_idx} 嵌入生成失败")
+                log.error(f"   🔢 批次编号: {batch_idx}")
+                log.error(f"   📊 受影响文档数: {batch_size_actual}")
+                log.error(f"   ❌ 错误信息: {batch_output.error}")
+                log.error(f"   📋 受影响的文档:")
+                for i in range(min(3, batch_size_actual)):  # 只显示前3个文档
+                    if doc_idx + i < len(output):
+                        doc = output[doc_idx + i]
+                        file_path = doc.meta_data.get('file_path', f'document_{doc_idx + i}')
+                        text_preview = doc.text[:100] if hasattr(doc, 'text') else 'N/A'
+                        log.error(f"      [{i}] 文件={file_path}, 文本长度={len(doc.text) if hasattr(doc, 'text') else 0}, 内容={text_preview}...")
+                if batch_size_actual > 3:
+                    log.error(f"      ... (还有 {batch_size_actual - 3} 个文档)")
+                log.error("=" * 80)
                 log.warning(f"Creating empty vectors for {batch_size_actual} documents in batch {batch_idx}")
                 
                 for i in range(batch_size_actual):
