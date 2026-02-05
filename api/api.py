@@ -590,34 +590,50 @@ async def delete_wiki_cache(
 
                     # 删除 LocalDB 文件
                     root_path = get_adalflow_default_root_path()
-                    repo_name = f"{owner}_{repo}"
-                    db_file = os.path.join(root_path, "databases", f"{repo_name}.pkl")
 
+                    # 🔧 修复：对于本地仓库（repo_type=local），文件名是 {repo}.pkl
+                    # 对于远程仓库，文件名可能是 {owner}_{repo}.pkl
+                    if repo_type == "local":
+                        db_file = os.path.join(root_path, "databases", f"{repo}.pkl")
+                    else:
+                        db_file = os.path.join(root_path, "databases", f"{owner}_{repo}.pkl")
+
+                    logger.info(f"Checking LocalDB file: {db_file}")
                     if os.path.exists(db_file):
                         os.remove(db_file)
                         logger.info(f"✅ Deleted LocalDB file: {db_file}")
+                    else:
+                        logger.warning(f"⚠️ LocalDB file not found: {db_file}")
 
                     # 删除 DashScope 向量缓存文件
                     cache_dir = "./embedding_cache"
                     if os.path.exists(cache_dir):
-                        # DashScope 缓存文件命名规则: dashscope_{repo_name}_Embedder_dashscope_embeddings.pkl
-                        cache_pattern = f"dashscope_{repo_name}_"
+                        # DashScope 缓存文件命名规则: dashscope_{repo}_ 或 dashscope_{owner}_{repo}_
+                        # 需要匹配多种可能的命名模式
+                        cache_patterns = [
+                            f"dashscope_{repo}_",  # 本地仓库: dashscope_bz_
+                            f"dashscope_{owner}_{repo}_"  # 远程仓库: dashscope_owner_repo_
+                        ]
                         deleted_cache_files = []
 
                         for filename in os.listdir(cache_dir):
-                            if filename.startswith(cache_pattern) and filename.endswith(".pkl"):
-                                cache_file = os.path.join(cache_dir, filename)
-                                try:
-                                    os.remove(cache_file)
-                                    deleted_cache_files.append(filename)
-                                    logger.info(f"✅ Deleted DashScope cache file: {cache_file}")
-                                except Exception as e:
-                                    logger.warning(f"⚠️ Failed to delete cache file {cache_file}: {e}")
+                            if filename.endswith(".pkl"):
+                                # 检查是否匹配任何缓存模式
+                                if any(filename.startswith(pattern) for pattern in cache_patterns):
+                                    cache_file = os.path.join(cache_dir, filename)
+                                    try:
+                                        os.remove(cache_file)
+                                        deleted_cache_files.append(filename)
+                                        logger.info(f"✅ Deleted DashScope cache file: {cache_file}")
+                                    except Exception as e:
+                                        logger.warning(f"⚠️ Failed to delete cache file {cache_file}: {e}")
 
                         if deleted_cache_files:
                             logger.info(f"✅ Deleted {len(deleted_cache_files)} DashScope cache file(s) for {owner}/{repo}")
                         else:
-                            logger.debug(f"No DashScope cache files found for {repo_name}")
+                            logger.debug(f"No DashScope cache files found for {owner}/{repo}")
+                    else:
+                        logger.warning(f"⚠️ Cache directory not found: {cache_dir}")
 
             except ImportError as e:
                 logger.warning(f"Failed to import vector_db module: {e}")

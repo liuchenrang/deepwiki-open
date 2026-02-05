@@ -800,23 +800,33 @@ class PgvectorBackend(VectorDBBackend):
         # 删除 DashScope 向量缓存文件
         import os
         cache_dir = "./embedding_cache"
-        repo_name = f"{owner}_{repo}"
         if os.path.exists(cache_dir):
-            cache_pattern = f"dashscope_{repo_name}_"
+            # 🔧 修复：支持多种缓存文件命名模式
+            # dashscope_{repo}_ (本地仓库: dashscope_bz_)
+            # dashscope_{owner}_{repo}_ (远程仓库: dashscope_owner_repo_)
+            cache_patterns = [
+                f"dashscope_{repo}_",
+                f"dashscope_{owner}_{repo}_"
+            ]
             deleted_cache_files = []
 
             for filename in os.listdir(cache_dir):
-                if filename.startswith(cache_pattern) and filename.endswith(".pkl"):
-                    cache_file = os.path.join(cache_dir, filename)
-                    try:
-                        os.remove(cache_file)
-                        deleted_cache_files.append(filename)
-                        logger.info(f"[pgvector] ✅ 删除缓存文件: {cache_file}")
-                    except Exception as e:
-                        logger.warning(f"[pgvector] ⚠️ 删除缓存文件失败 {cache_file}: {e}")
+                if filename.endswith(".pkl"):
+                    if any(filename.startswith(pattern) for pattern in cache_patterns):
+                        cache_file = os.path.join(cache_dir, filename)
+                        try:
+                            os.remove(cache_file)
+                            deleted_cache_files.append(filename)
+                            logger.info(f"[pgvector] ✅ 删除缓存文件: {cache_file}")
+                        except Exception as e:
+                            logger.warning(f"[pgvector] ⚠️ 删除缓存文件失败 {cache_file}: {e}")
 
             if deleted_cache_files:
                 logger.info(f"[pgvector] ✅ 删除了 {len(deleted_cache_files)} 个缓存文件")
+            else:
+                logger.debug(f"[pgvector] 未找到匹配的缓存文件: {owner}/{repo}")
+        else:
+            logger.warning(f"[pgvector] 缓存目录不存在: {cache_dir}")
 
         return True
 
@@ -867,23 +877,31 @@ class PgvectorBackend(VectorDBBackend):
                     # 删除 DashScope 向量缓存文件
                     import os
                     cache_dir = "./embedding_cache"
-                    repo_name = f"{owner}_{repo}"
                     if os.path.exists(cache_dir):
-                        cache_pattern = f"dashscope_{repo_name}_"
+                        # 🔧 修复：支持多种缓存文件命名模式
+                        cache_patterns = [
+                            f"dashscope_{repo}_",
+                            f"dashscope_{owner}_{repo}_"
+                        ]
                         deleted_cache_files = []
 
                         for filename in os.listdir(cache_dir):
-                            if filename.startswith(cache_pattern) and filename.endswith(".pkl"):
-                                cache_file = os.path.join(cache_dir, filename)
-                                try:
-                                    os.remove(cache_file)
-                                    deleted_cache_files.append(filename)
-                                    logger.info(f"[pgvector] ✅ 删除缓存文件: {cache_file}")
-                                except Exception as e:
-                                    logger.warning(f"[pgvector] ⚠️ 删除缓存文件失败 {cache_file}: {e}")
+                            if filename.endswith(".pkl"):
+                                if any(filename.startswith(pattern) for pattern in cache_patterns):
+                                    cache_file = os.path.join(cache_dir, filename)
+                                    try:
+                                        os.remove(cache_file)
+                                        deleted_cache_files.append(filename)
+                                        logger.info(f"[pgvector] ✅ 删除缓存文件: {cache_file}")
+                                    except Exception as e:
+                                        logger.warning(f"[pgvector] ⚠️ 删除缓存文件失败 {cache_file}: {e}")
 
                         if deleted_cache_files:
                             logger.info(f"[pgvector] ✅ 删除了 {len(deleted_cache_files)} 个缓存文件")
+                        else:
+                            logger.debug(f"[pgvector] 未找到匹配的缓存文件: {owner}/{repo}")
+                    else:
+                        logger.warning(f"[pgvector] 缓存目录不存在: {cache_dir}")
 
         logger.info(f"[pgvector] ✅ 成功删除 {deleted_count} 个文档")
         logger.info("=" * 80)
