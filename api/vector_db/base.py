@@ -72,13 +72,17 @@ class VectorDBBackend(ABC):
         pass
 
     @abstractmethod
-    def delete_by_metadata(self, key: str, value: Any) -> int:
+    def delete_by_metadata(self, key: str, value: Any, soft_delete: bool = True) -> int:
         """
         根据元数据删除文档
 
         Args:
             key: 元数据键
             value: 元数据值
+            soft_delete: 是否使用软删除（默认 True）
+                        - True: 标记为已删除（deleted = TRUE）
+                        - False: 物理删除（从数据库中移除记录）
+                        注意：FAISS 仅支持软删除
 
         Returns:
             删除的文档数量

@@ -480,23 +480,48 @@ class PgvectorBackend(VectorDBBackend):
         logger.info(f"Deleted {deleted_count} documents")
         return deleted_count
 
-    def delete_by_metadata(self, key: str, value: Any) -> int:
-        """根据元数据删除文档"""
+    def delete_by_metadata(self, key: str, value: Any, soft_delete: bool = True) -> int:
+        """
+        根据元数据删除文档
+
+        Args:
+            key: 元数据键
+            value: 元数据值
+            soft_delete: 是否使用软删除（默认 True）
+                        - True: 标记为已删除（deleted = TRUE）
+                        - False: 物理删除（从数据库中移除记录）
+
+        Returns:
+            删除的文档数量
+        """
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE document_chunks
-                    SET deleted = TRUE
-                    WHERE repository_id = %s
-                      AND metadata->>%s = %s
-                      AND deleted = FALSE
-                    """,
-                    (self.repository_id, key, str(value))
-                )
+                if soft_delete:
+                    # 软删除：标记为已删除
+                    cur.execute(
+                        """
+                        UPDATE document_chunks
+                        SET deleted = TRUE
+                        WHERE repository_id = %s
+                          AND metadata->>%s = %s
+                          AND deleted = FALSE
+                        """,
+                        (self.repository_id, key, str(value))
+                    )
+                else:
+                    # 物理删除：直接从数据库中删除记录
+                    cur.execute(
+                        """
+                        DELETE FROM document_chunks
+                        WHERE repository_id = %s
+                          AND metadata->>%s = %s
+                        """,
+                        (self.repository_id, key, str(value))
+                    )
                 deleted_count = cur.rowcount
                 conn.commit()
 
+        logger.info(f"{'软删除' if soft_delete else '物理删除'} {deleted_count} 个文档 (key={key}, value={value})")
         return deleted_count
 
     def search(

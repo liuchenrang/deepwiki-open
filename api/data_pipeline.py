@@ -1481,9 +1481,9 @@ class DatabaseManager:
                     # 删除所有变更文件的向量
                     all_changed_files = modified_files | deleted_files
                     if all_changed_files:
-                        logger.info(f"   → 删除 {len(all_changed_files)} 个变更文件的旧向量")
+                        logger.info(f"   → 物理删除 {len(all_changed_files)} 个变更文件的旧向量")
                         for file_path in all_changed_files:
-                            count = self.vector_db.delete_by_metadata("file_path", file_path)
+                            count = self.vector_db.delete_by_metadata("file_path", file_path, soft_delete=False)
                             logger.debug(f"      - 删除 {file_path}: {count} 个文档")
 
                     # 找出需要重新添加的文档（新增或修改的文件）

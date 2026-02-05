@@ -118,13 +118,15 @@ class FaissBackend(VectorDBBackend):
         logger.info(f"Soft deleted {deleted_count} documents")
         return deleted_count
 
-    def delete_by_metadata(self, key: str, value: Any) -> int:
+    def delete_by_metadata(self, key: str, value: Any, soft_delete: bool = True) -> int:
         """
         根据元数据删除文档
 
         Args:
             key: 元数据键
             value: 元数据值
+            soft_delete: 是否使用软删除（默认 True）
+                        注意：FAISS 仅支持软删除，此参数为了接口一致性保留
 
         Returns:
             删除的文档数量
