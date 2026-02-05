@@ -185,6 +185,48 @@ class VectorDBBackend(ABC):
         pass
 
     @abstractmethod
+    def delete_repository(self, owner: str, repo: str) -> bool:
+        """
+        完全删除仓库及其所有向量数据
+
+        删除所有相关的：
+        - 所有文档块和向量数据
+        - 仓库记录（对于支持仓库管理的后端如 pgvector）
+
+        Args:
+            owner: 仓库所有者
+            repo: 仓库名称
+
+        Returns:
+            是否成功删除
+
+        注意：
+            - FAISS 后端不支持仓库概念，此操作会清空所有数据
+            - 删除后下次导入相同仓库会创建全新的 repository_id
+        """
+        pass
+
+    @abstractmethod
+    def clear_repository_documents(self, repository_id: Any = None) -> int:
+        """
+        清空仓库的所有向量数据（但保留仓库记录）
+
+        与 delete_repository() 不同，此方法只删除向量数据，保留仓库元数据。
+        适用于需要重新生成向量的场景。
+
+        Args:
+            repository_id: 仓库 ID，如果为 None 则使用当前仓库
+                          FAISS 后端不支持此参数，会清空所有数据
+
+        Returns:
+            删除的文档数量
+
+        Raises:
+            ValueError: 如果没有设置 repository_id（对于需要 repository_id 的后端）
+        """
+        pass
+
+    @abstractmethod
     def close(self) -> None:
         """关闭数据库连接，释放资源"""
         pass

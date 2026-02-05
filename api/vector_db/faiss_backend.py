@@ -393,6 +393,71 @@ class FaissBackend(VectorDBBackend):
 
         logger.info(f"Database loaded from {path}, {len(self.documents)} documents")
 
+    def delete_repository(self, owner: str, repo: str) -> bool:
+        """
+        完全删除仓库及其所有向量数据
+
+        注意：FAISS 不支持仓库概念，此操作会清空所有数据。
+        此方法为了接口一致性而保留。
+
+        Args:
+            owner: 仓库所有者（FAISS 不使用）
+            repo: 仓库名称（FAISS 不使用）
+
+        Returns:
+            是否成功删除
+        """
+        logger.info("=" * 80)
+        logger.info(f"[FAISS] 删除仓库 {owner}/{repo}（清空所有数据）")
+
+        deleted_count = len(self.documents)
+
+        # 清空所有数据
+        self.documents = []
+        self.doc_id_map = {}
+        self.next_doc_id = 0
+
+        # 如果有 FAISS 索引，也需要清空
+        if self.db and hasattr(self.db, '_data'):
+            self.db._data = []
+
+        logger.info(f"[FAISS] ✅ 成功删除 {deleted_count} 个文档")
+        logger.info("=" * 80)
+
+        return True
+
+    def clear_repository_documents(self, repository_id: Any = None) -> int:
+        """
+        清空仓库的所有向量数据（但保留仓库记录）
+
+        注意：FAISS 不支持仓库概念，此操作等同于 delete_repository()。
+        此方法为了接口一致性而保留。
+
+        Args:
+            repository_id: 仓库 ID（FAISS 不使用）
+
+        Returns:
+            删除的文档数量
+        """
+        logger.info("=" * 80)
+        logger.info(f"[FAISS] 清空所有向量数据")
+
+        deleted_count = len(self.documents)
+
+        # 清空所有数据
+        self.documents = []
+        self.doc_id_map = {}
+        self.next_doc_id = 0
+
+        # 如果有 FAISS 索引，也需要清空
+        if self.db and hasattr(self.db, '_data'):
+            self.db._data = []
+
+        logger.info(f"[FAISS] ✅ 成功删除 {deleted_count} 个文档")
+        logger.info("=" * 80)
+
+        return deleted_count
+
     def close(self) -> None:
         """关闭数据库连接"""
         # FAISS 不需要关闭连接

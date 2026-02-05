@@ -762,6 +762,155 @@ async def cleanup_orphan_repositories(
     finally:
         logger.info("=" * 80)
 
+@app.delete("/api/repository/{owner}/{repo}")
+async def delete_repository(
+    owner: str,
+    repo: str,
+    authorization_code: Optional[str] = Query(None, description="Authorization code")
+):
+    """
+    完全删除指定仓库及其所有向量数据
+
+    删除所有相关的：
+    - document_chunks 表中的所有向量数据
+    - repositories 表中的仓库记录
+    - LocalDB 文件（如果存在）
+
+    Args:
+        owner: 仓库所有者
+        repo: 仓库名称
+        authorization_code: 授权码（如果启用了认证）
+
+    Returns:
+        删除结果，包含删除的文档数量和仓库记录数量
+
+    注意：
+        - 删除后下次导入相同仓库会创建全新的 repository_id
+        - 此操作不可逆，请谨慎使用
+    """
+    # 验证权限（如果启用了认证）
+    if WIKI_AUTH_MODE:
+        logger.info("Checking authorization code for delete repository operation")
+        if not authorization_code or WIKI_AUTH_CODE != authorization_code:
+            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+
+    logger.info("=" * 80)
+    logger.info(f"🗑️ [DELETE] Deleting repository: {owner}/{repo}")
+
+    try:
+        from api.vector_db import get_vector_db
+
+        vector_db = get_vector_db()
+
+        # 调用删除仓库方法
+        success = vector_db.delete_repository(owner, repo)
+
+        if not success:
+            logger.warning(f"Repository not found: {owner}/{repo}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Repository not found: {owner}/{repo}"
+            )
+
+        # 删除 LocalDB 文件
+        try:
+            root_path = get_adalflow_default_root_path()
+            db_file = os.path.join(root_path, "databases", f"{owner}_{repo}.pkl")
+            if os.path.exists(db_file):
+                os.remove(db_file)
+                logger.info(f"   ✅ Deleted LocalDB file: {db_file}")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Failed to delete LocalDB file: {e}")
+
+        logger.info(f"✅ Repository {owner}/{repo} deleted successfully")
+        logger.info("=" * 80)
+
+        return {
+            "message": f"Repository {owner}/{repo} deleted successfully",
+            "owner": owner,
+            "repo": repo
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete repository {owner}/{repo}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete repository: {str(e)}"
+        )
+    finally:
+        logger.info("=" * 80)
+
+@app.post("/api/repository/{owner}/{repo}/clear")
+async def clear_repository_vectors(
+    owner: str,
+    repo: str,
+    authorization_code: Optional[str] = Query(None, description="Authorization code")
+):
+    """
+    清空指定仓库的所有向量数据（但保留仓库记录）
+
+    与 delete_repository() 不同，此方法只删除向量数据，保留仓库元数据。
+    适用于需要重新生成向量的场景。
+
+    Args:
+        owner: 仓库所有者
+        repo: 仓库名称
+        authorization_code: 授权码（如果启用了认证）
+
+    Returns:
+        清空结果，包含删除的文档数量
+    """
+    # 验证权限（如果启用了认证）
+    if WIKI_AUTH_MODE:
+        logger.info("Checking authorization code for clear repository operation")
+        if not authorization_code or WIKI_AUTH_CODE != authorization_code:
+            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+
+    logger.info("=" * 80)
+    logger.info(f"🧹 [CLEAR] Clearing vectors for repository: {owner}/{repo}")
+
+    try:
+        from api.vector_db import get_vector_db
+
+        vector_db = get_vector_db()
+
+        # 先设置仓库上下文
+        vector_db.use_repository(owner=owner, repo=repo, repo_url=f"https://github.com/{owner}/{repo}")
+
+        # 调用清空向量方法
+        deleted_count = vector_db.clear_repository_documents()
+
+        # 删除 LocalDB 文件（强制重新生成）
+        try:
+            root_path = get_adalflow_default_root_path()
+            db_file = os.path.join(root_path, "databases", f"{owner}_{repo}.pkl")
+            if os.path.exists(db_file):
+                os.remove(db_file)
+                logger.info(f"   ✅ Deleted LocalDB file: {db_file}")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Failed to delete LocalDB file: {e}")
+
+        logger.info(f"✅ Cleared {deleted_count} vectors from repository {owner}/{repo}")
+        logger.info("=" * 80)
+
+        return {
+            "message": f"Vectors cleared successfully from repository {owner}/{repo}",
+            "owner": owner,
+            "repo": repo,
+            "deleted_documents": deleted_count
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to clear vectors for repository {owner}/{repo}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear vectors: {str(e)}"
+        )
+    finally:
+        logger.info("=" * 80)
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint for Docker and monitoring"""

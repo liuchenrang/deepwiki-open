@@ -737,6 +737,107 @@ class PgvectorBackend(VectorDBBackend):
         """
         logger.debug("PostgreSQL data is already loaded, load() is a NOP")
 
+    def delete_repository(self, owner: str, repo: str) -> bool:
+        """
+        完全删除仓库及其所有向量数据
+
+        删除所有相关的：
+        - document_chunks 表中的所有向量数据
+        - repositories 表中的仓库记录
+
+        Args:
+            owner: 仓库所有者
+            repo: 仓库名称
+
+        Returns:
+            是否成功删除
+        """
+        logger.info("=" * 80)
+        logger.info(f"[pgvector] 删除仓库: {owner}/{repo}")
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                # 查找仓库 ID
+                cur.execute(
+                    "SELECT id FROM repositories WHERE owner = %s AND repo = %s",
+                    (owner, repo)
+                )
+                result = cur.fetchone()
+
+                if not result:
+                    logger.warning(f"[pgvector] 仓库不存在: {owner}/{repo}")
+                    logger.info("=" * 80)
+                    return False
+
+                repository_id = result[0]
+
+                # 1. 删除所有文档块（物理删除）
+                cur.execute(
+                    "DELETE FROM document_chunks WHERE repository_id = %s",
+                    (repository_id,)
+                )
+                deleted_chunks = cur.rowcount
+                logger.info(f"   → 删除 {deleted_chunks} 个文档块")
+
+                # 2. 删除仓库记录
+                cur.execute(
+                    "DELETE FROM repositories WHERE id = %s",
+                    (repository_id,)
+                )
+                deleted_repo = cur.rowcount
+                logger.info(f"   → 删除 {deleted_repo} 个仓库记录")
+
+                conn.commit()
+
+        logger.info(f"[pgvector] ✅ 成功删除仓库 {owner}/{repo}")
+        logger.info("=" * 80)
+
+        # 如果删除的是当前仓库，清空 repository_id
+        if self.repository_id == repository_id:
+            self.repository_id = None
+            logger.info(f"[pgvector] 清空当前 repository_id（因为已删除）")
+
+        return True
+
+    def clear_repository_documents(self, repository_id: int = None) -> int:
+        """
+        清空仓库的所有向量数据（但保留仓库记录）
+
+        与 delete_repository() 不同，此方法只删除向量数据，保留仓库元数据。
+        适用于需要重新生成向量的场景。
+
+        Args:
+            repository_id: 仓库 ID，如果为 None 则使用当前仓库
+
+        Returns:
+            删除的文档数量
+
+        Raises:
+            ValueError: 如果没有设置 repository_id
+        """
+        if repository_id is None:
+            repository_id = self.repository_id
+
+        if repository_id is None:
+            raise ValueError("Repository not set. Call use_repository() first.")
+
+        logger.info("=" * 80)
+        logger.info(f"[pgvector] 清空仓库 {repository_id} 的所有向量")
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM document_chunks WHERE repository_id = %s",
+                    (repository_id,)
+                )
+                deleted_count = cur.rowcount
+                conn.commit()
+
+        logger.info(f"[pgvector] ✅ 成功删除 {deleted_count} 个文档")
+        logger.info("=" * 80)
+
+        return deleted_count
+
     def close(self) -> None:
         """关闭所有数据库连接"""
         with self._pool_lock:
