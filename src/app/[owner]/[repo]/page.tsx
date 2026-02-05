@@ -448,12 +448,13 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
     *   Identify key functions, classes, data structures, API endpoints, or configuration elements pertinent to that section.
 
 3.  **Mermaid Diagrams:**
-    *   EXTENSIVELY use Mermaid diagrams (e.g., \`flowchart TD\`, \`sequenceDiagram\`, \`classDiagram\`, \`erDiagram\`, \`graph TD\`) to visually represent architectures, flows, relationships, and schemas found in the source files.
+    *   EXTENSIVELY use Mermaid diagrams (e.g., \`graph TD\`, \`sequenceDiagram\`, \`classDiagram\`, \`erDiagram\`) to visually represent architectures, flows, relationships, and schemas found in the source files.
+    *   CRITICAL SYNTAX RULE: ALWAYS use \`graph TD\` for flow diagrams - NEVER use \`flowchart TD\` as it's not compatible with all Mermaid versions.
     *   Ensure diagrams are accurate and directly derived from information in the \`[RELEVANT_SOURCE_FILES]\`.
     *   Provide a brief explanation before or after each diagram to give context.
     *   CRITICAL: All diagrams MUST follow strict vertical orientation:
        - Use "graph TD" (top-down) directive for flow diagrams
-       - NEVER use "graph LR" (left-right)
+       - NEVER use "flowchart TD" or "graph LR" (left-right)
        - Maximum node width should be 3-4 words
        - For sequence diagrams:
          - Start with "sequenceDiagram" directive on its own line
@@ -643,6 +644,12 @@ Remember:
 
         // Clean up markdown delimiters
         content = content.replace(/^```markdown\s*/i, '').replace(/```\s*$/i, '');
+
+        // Normalize Mermaid diagram syntax for compatibility
+        // Replace 'flowchart' with 'graph' to ensure compatibility with all Mermaid versions
+        content = content.replace(/```mermaid\r?\n\s*flowchart/gm, (match) => {
+          return match.replace('flowchart', 'graph');
+        });
 
         console.log(`Received content for ${page.title}, length: ${content.length} characters`);
 

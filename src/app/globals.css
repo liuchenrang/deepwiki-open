@@ -15,6 +15,11 @@
   --highlight: #e8927c; /* Soft coral (Akane) */
   --muted: #a59e8c; /* Soft gray-brown (Nezumi) */
   --link-color: #7c5aa0; /* Slightly darker purple for links */
+
+  /* System font stacks for Japanese and general text */
+  --font-geist-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", Meiryo, sans-serif;
+  --font-geist-mono: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+  --font-serif-jp: "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif;
 }
 
 html[data-theme='dark'] {
