@@ -63,6 +63,14 @@ const nextConfig: NextConfig = {
         source: '/api/lang/config',
         destination: `${TARGET_SERVER_BASE_URL}/lang/config`,
       },
+      {
+        source: '/api/wiki/refresh',
+        destination: `${TARGET_SERVER_BASE_URL}/api/wiki/refresh`,
+      },
+      {
+        source: '/api/wiki/refresh/:path*',
+        destination: `${TARGET_SERVER_BASE_URL}/api/wiki/refresh/:path*`,
+      },
     ];
   },
 };

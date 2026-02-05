@@ -397,6 +397,156 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
     logger.info(f"Found {len(documents)} documents")
     return documents
 
+def read_specific_files(repo_path: str, file_paths: List[str], embedder_type: str = None, is_ollama_embedder: bool = None,
+                       excluded_dirs: List[str] = None, excluded_files: List[str] = None,
+                       included_dirs: List[str] = None, included_files: List[str] = None):
+    """
+    只读取指定的文件(用于增量更新)
+
+    优化性能:只读取变更的文件,避免扫描整个目录
+
+    Args:
+        repo_path (str): 仓库根目录路径
+        file_paths (List[str]): 要读取的文件的完整路径列表
+        embedder_type (str, optional): 嵌入器类型 ('openai', 'google', 'ollama')
+        is_ollama_embedder (bool, optional): 已弃用,使用 embedder_type
+        excluded_dirs (List[str], optional): 要排除的目录列表
+        excluded_files (List[str], optional): 要排除的文件模式列表
+        included_dirs (List[str], optional): 要包含的目录列表
+        included_files (List[str], optional): 要包含的文件模式列表
+
+    Returns:
+        list: Document 对象列表
+    """
+    import time
+    start_time = time.time()
+
+    # 处理向后兼容性
+    if embedder_type is None and is_ollama_embedder is not None:
+        embedder_type = 'ollama' if is_ollama_embedder else None
+
+    documents = []
+
+    # 支持的文件扩展名
+    code_extensions = [".py", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".hpp", ".go", ".rs",
+                       ".jsx", ".tsx", ".html", ".css", ".php", ".swift", ".cs"]
+    doc_extensions = [".md", ".txt", ".rst", ".json", ".yaml", ".yml"]
+    all_extensions = code_extensions + doc_extensions
+
+    # 确定过滤模式
+    use_inclusion_mode = (included_dirs is not None and len(included_dirs) > 0) or \
+                        (included_files is not None and len(included_files) > 0)
+
+    logger.info(f"📖 Reading {len(file_paths)} specific files from {repo_path}")
+
+    for file_path in file_paths:
+        # 规范化路径
+        file_path = os.path.normpath(file_path)
+
+        # 检查文件是否存在
+        if not os.path.exists(file_path):
+            logger.warning(f"⚠️  File not found: {file_path}")
+            continue
+
+        # 获取相对路径
+        try:
+            relative_path = os.path.relpath(file_path, repo_path)
+        except ValueError:
+            # 文件不在 repo_path 下,使用文件名
+            relative_path = os.path.basename(file_path)
+
+        # 检查是否应该排除
+        if not use_inclusion_mode:
+            if excluded_dirs or excluded_files:
+                # 复用 should_process_file 逻辑(内联避免循环导入)
+                file_path_parts = relative_path.split(os.sep)
+                file_name = os.path.basename(relative_path)
+
+                is_excluded = False
+
+                # 检查是否在排除目录中
+                for excluded in excluded_dirs or []:
+                    clean_excluded = excluded.strip("./").rstrip("/")
+                    if clean_excluded in file_path_parts:
+                        is_excluded = True
+                        break
+
+                # 检查是否匹配排除文件模式
+                if not is_excluded:
+                    for excluded_file in excluded_files or []:
+                        if file_name == excluded_file:
+                            is_excluded = True
+                            break
+
+                if is_excluded:
+                    logger.debug(f"Skipping excluded file: {relative_path}")
+                    continue
+
+        # 检查是否是支持的文件类型
+        file_ext = os.path.splitext(file_path)[1].lower()
+        if file_ext not in all_extensions:
+            logger.debug(f"Skipping unsupported file type: {relative_path} ({file_ext})")
+            continue
+
+        # 读取文件
+        try:
+            # 尝试 UTF-8,失败则使用 latin-1
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                with open(file_path, "r", encoding="latin-1") as f:
+                    content = f.read()
+                logger.warning(f"File {relative_path} is not UTF-8 encoded, read as latin-1")
+
+            # 检查 token 数量
+            token_count = count_tokens(content, embedder_type)
+
+            # 确定是否是代码文件
+            is_code = file_ext in code_extensions
+            max_tokens = MAX_EMBEDDING_TOKENS * 10 if is_code else MAX_EMBEDDING_TOKENS
+
+            if token_count > max_tokens:
+                logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
+                continue
+
+            # 确定是否是实现文件(仅对代码文件)
+            is_implementation = False
+            if is_code:
+                is_implementation = (
+                    not relative_path.startswith("test_")
+                    and not relative_path.startswith("app_")
+                    and "test" not in relative_path.lower()
+                )
+
+            # 创建 Document 对象
+            doc = Document(
+                text=content,
+                meta_data={
+                    "file_path": relative_path,
+                    "type": file_ext[1:],
+                    "is_code": is_code,
+                    "is_implementation": is_implementation,
+                    "title": relative_path,
+                    "token_count": token_count,
+                },
+            )
+            documents.append(doc)
+            logger.debug(f"✅ Read {relative_path}")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to read {file_path}: {e}")
+
+    # 性能日志
+    duration = time.time() - start_time
+    logger.info(f"   → Successfully read {len(documents)} documents from {len(file_paths)} files in {duration:.2f}s ({duration/len(file_paths) if file_paths else 0:.3f}s per file)")
+
+    # 性能告警
+    if duration > 10:
+        logger.warning(f"⚠️ Reading {len(file_paths)} files took too long: {duration:.2f}s")
+
+    return documents
+
 def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = None, repo_name: str = None):
     """
     Creates and returns the data transformation pipeline.
@@ -1012,7 +1162,31 @@ class DatabaseManager:
                     pull_latest_changes(save_repo_dir)
             else:  # local path
                 repo_name = os.path.basename(repo_url_or_path)
-                save_repo_dir = repo_url_or_path
+
+                # 🔧 智能路径检测：尝试找到实际的工作目录
+                possible_paths = [
+                    repo_url_or_path,              # 原始路径: /local/bz
+                    f"/ywmall/{repo_name}",         # 实际工作目录: /ywmall/bz
+                    f"/app/{repo_name}",            # 应用目录: /app/bz
+                ]
+
+                save_repo_dir = repo_url_or_path  # 默认值
+                for path in possible_paths:
+                    if os.path.isdir(path):
+                        # 检查是否是 Git 仓库
+                        git_dir = os.path.join(path, ".git")
+                        if os.path.exists(git_dir):
+                            # 检查是否有代码文件（不只是 .git）
+                            try:
+                                files = [f for f in os.listdir(path)
+                                       if os.path.isfile(os.path.join(path, f))
+                                       and f != ".DS_Store"]
+                                if len(files) > 0:
+                                    save_repo_dir = path
+                                    logger.info(f"✅ 智能路径检测: 使用 {path} (包含 {len(files)} 个文件)")
+                                    break
+                            except Exception:
+                                continue
 
                 # 对于本地路径，如果不是 git 仓库则初始化
                 if not is_git_repository(save_repo_dir):
@@ -1103,9 +1277,15 @@ class DatabaseManager:
         current_commit = get_current_commit(self.repo_paths["save_repo_dir"])
 
         # 🔧 关键修复：使用 pgvector 时从数据库读取 commit 状态
-        if self.use_vector_db and self.vector_db and hasattr(self.vector_db, 'get_current_commit'):
+        # ⚠️ 必须使用 last_generated_commit，而不是 current_commit
+        # 因为 current_commit 会被 use_repository() 等操作提前更新
+        if self.use_vector_db and self.vector_db and hasattr(self.vector_db, 'get_last_generated_commit'):
+            saved_commit = self.vector_db.get_last_generated_commit()
+            logger.info(f"   → 从 pgvector 数据库读取 last_generated_commit 状态")
+        elif self.use_vector_db and self.vector_db and hasattr(self.vector_db, 'get_current_commit'):
+            # 兼容旧版本：如果没有 last_generated_commit，使用 current_commit
             saved_commit = self.vector_db.get_current_commit()
-            logger.info(f"   → 从 pgvector 数据库读取 commit 状态")
+            logger.info(f"   → 从 pgvector 数据库读取 current_commit 状态（兼容模式）")
         else:
             saved_commit = load_commit_state(self.repo_paths["save_db_file"])
 
@@ -1329,29 +1509,35 @@ class DatabaseManager:
                         logger.info(f"🔄 重新处理 {len(files_to_reprocess)} 个变更的文件")
                         logger.info(f"   → 文件列表: {list(files_to_reprocess)[:10]}...")
 
-                        # 重新读取这些文件并生成向量
-                        new_documents = read_all_documents(
-                            self.repo_paths["save_repo_dir"],
-                            embedder_type=embedder_type,
-                            excluded_dirs=excluded_dirs,
-                            excluded_files=excluded_files,
-                            included_dirs=included_dirs,
-                            included_files=included_files
-                        )
-
-                        # 🔍 调试日志：显示所有读取到的文件
-                        logger.info(f"   📄 读取到 {len(new_documents)} 个文件:")
-                        for doc in new_documents:
-                            file_path = doc.meta_data.get('file_path', 'unknown')
-                            is_changed = file_path in files_to_reprocess
-                            status = "✅ 变更" if is_changed else "⏩ 未变更"
-                            logger.info(f"      {status} - {file_path}")
-
-                        # 只保留需要重新处理的文件
-                        reprocess_documents = [
-                            doc for doc in new_documents
-                            if doc.meta_data.get('file_path') in files_to_reprocess
+                        # 🔧 性能优化:只读取变更的文件,避免扫描整个目录
+                        # 构建完整路径
+                        full_file_paths = [
+                            os.path.join(self.repo_paths["save_repo_dir"], fp)
+                            for fp in files_to_reprocess
                         ]
+
+                        # 验证文件存在
+                        valid_file_paths = []
+                        for fp in full_file_paths:
+                            if os.path.exists(fp):
+                                valid_file_paths.append(fp)
+                            else:
+                                logger.warning(f"⚠️  File not found (may have been deleted): {fp}")
+
+                        if valid_file_paths:
+                            # 只读取变更的文件(性能优化:避免扫描整个目录)
+                            reprocess_documents = read_specific_files(
+                                self.repo_paths["save_repo_dir"],
+                                valid_file_paths,
+                                embedder_type=embedder_type,
+                                is_ollama_embedder=is_ollama_embedder,
+                                excluded_dirs=excluded_dirs,
+                                excluded_files=excluded_files,
+                                included_dirs=included_dirs,
+                                included_files=included_files
+                            )
+                        else:
+                            reprocess_documents = []
 
                         if reprocess_documents:
                             logger.info(f"   → 找到 {len(reprocess_documents)} 个需要重新处理的文档")

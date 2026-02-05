@@ -1574,7 +1574,7 @@ IMPORTANT:
 
   const confirmRefresh = useCallback(async (newToken?: string) => {
     setShowModelOptions(false);
-    setLoadingMessage(messages.loading?.clearingCache || 'Clearing server cache...');
+    setLoadingMessage(messages.loading?.refreshingWiki || 'Refreshing wiki (incremental update)...');
     setIsLoading(true); // Show loading indicator immediately
 
     try {
@@ -1582,22 +1582,8 @@ IMPORTANT:
         owner: effectiveRepoInfo.owner,
         repo: effectiveRepoInfo.repo,
         repo_type: effectiveRepoInfo.type,
-        language: language,
-        provider: selectedProviderState,
-        model: selectedModelState,
-        is_custom_model: isCustomSelectedModelState.toString(),
-        custom_model: customSelectedModelState,
-        comprehensive: isComprehensiveView.toString(),
         authorization_code: authCode,
       });
-
-      // Add file filters configuration
-      if (modelExcludedDirs) {
-        params.append('excluded_dirs', modelExcludedDirs);
-      }
-      if (modelExcludedFiles) {
-        params.append('excluded_files', modelExcludedFiles);
-      }
 
       if(authRequired && !authCode) {
         setIsLoading(false);
@@ -1606,22 +1592,21 @@ IMPORTANT:
         return;
       }
 
-      const response = await fetch(`/api/wiki_cache?${params.toString()}`, {
-        method: 'DELETE',
+      // 🔧 修复：使用增量更新 API 而不是删除缓存
+      const response = await fetch(`/api/wiki/refresh?${params.toString()}`, {
+        method: 'POST',
         headers: {
           'Accept': 'application/json',
         }
       });
 
       if (response.ok) {
-        console.log('Server-side wiki cache cleared successfully.');
-        // Optionally, show a success message for cache clearing if desired
-        // setLoadingMessage('Cache cleared. Refreshing wiki...');
+        const result = await response.json();
+        console.log('✅ Wiki refreshed successfully (incremental update):', result);
+        setLoadingMessage(messages.loading?.initializing || 'Initializing wiki generation...');
       } else {
         const errorText = await response.text();
-        console.warn(`Failed to clear server-side wiki cache (status: ${response.status}): ${errorText}. Proceeding with refresh anyway.`);
-        // Optionally, inform the user about the cache clear failure but that refresh will still attempt
-        // setError(\`Cache clear failed: ${errorText}. Trying to refresh...\`);
+        console.warn(`Failed to refresh wiki (status: ${response.status}): ${errorText}.`);
         if(response.status == 401) {
           setIsLoading(false);
           setLoadingMessage(undefined);
@@ -1629,14 +1614,16 @@ IMPORTANT:
           console.error('Failed to validate the authorization code')
           return;
         }
+        // 如果增量更新失败，尝试继续
+        console.warn('Proceeding with normal load flow anyway...');
       }
     } catch (err) {
-      console.warn('Error calling DELETE /api/wiki_cache:', err);
+      console.warn('Error calling POST /api/wiki/refresh:', err);
       setIsLoading(false);
       setEmbeddingError(false); // Reset embedding error state
-      // Optionally, inform the user about the cache clear error
-      // setError(\`Error clearing cache: ${err instanceof Error ? err.message : String(err)}. Trying to refresh...\`);
-      throw err;
+      // 如果增量更新失败，尝试继续
+      console.warn('Proceeding with normal load flow anyway...');
+      // 不再 throw err，允许继续执行
     }
 
     // Update token if provided

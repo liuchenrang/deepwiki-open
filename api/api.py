@@ -664,6 +664,122 @@ async def delete_wiki_cache(
 
     return {"message": "; ".join(messages)}
 
+@app.post("/api/wiki/refresh")
+async def refresh_wiki(
+    owner: str = Query(..., description="Repository owner"),
+    repo: str = Query(..., description="Repository name"),
+    repo_type: str = Query(..., description="Repository type (e.g., github, gitlab, local)"),
+    authorization_code: Optional[str] = Query(None, description="Authorization code")
+):
+    """
+    增量更新 wiki：检测 Git 变更，只更新变更的文件向量。
+
+    这会：
+    1. 检测 Git commit 变更
+    2. 只删除变更文件的旧向量
+    3. 只重新生成变更文件的新向量
+    4. 保留未变更文件的向量（使用缓存）
+
+    与 DELETE /api/wiki_cache 的区别：
+    - DELETE: 全量删除，清空所有数据
+    - POST /refresh: 增量更新，只更新变更部分
+    """
+    # 验证权限（如果启用了认证）
+    if WIKI_AUTH_MODE:
+        if not authorization_code or WIKI_AUTH_CODE != authorization_code:
+            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+
+    logger.info("=" * 80)
+    logger.info(f"🔄 [REFRESH] 开始增量更新 wiki: {owner}/{repo} ({repo_type})")
+    logger.info("=" * 80)
+
+    try:
+        # 检查是否使用 pgvector
+        vector_db_backend = os.getenv("VECTOR_DB_BACKEND", "faiss")
+
+        if vector_db_backend != "pgvector":
+            logger.warning(f"增量更新仅支持 pgvector，当前后端: {vector_db_backend}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Incremental refresh only supports pgvector backend. Current: {vector_db_backend}"
+            )
+
+        from api.data_pipeline import DatabaseManager
+        from api.git_utils import get_current_commit, detect_changes
+
+        # 🔧 智能路径检测：local 类型仓库可能在多个位置
+        if repo_type == "local":
+            # 尝试多个可能的路径（按优先级）
+            possible_paths = [
+                f"/{owner}/{repo}",      # 标准路径: /local/bz
+                f"/ywmall/{repo}",        # 实际工作目录: /ywmall/bz
+                f"/app/{owner}/{repo}",   # 应用目录: /app/local/bz
+            ]
+
+            repo_path = None
+            for path in possible_paths:
+                if os.path.isdir(path):
+                    # 检查是否是 Git 仓库
+                    git_dir = os.path.join(path, ".git")
+                    if os.path.exists(git_dir):
+                        # 检查是否有代码文件（不只是 .git）
+                        # 至少应该有一些非 .git 的文件
+                        try:
+                            files = [f for f in os.listdir(path)
+                                   if os.path.isfile(os.path.join(path, f))
+                                   and f != ".DS_Store"]
+                            if len(files) > 0:
+                                repo_path = path
+                                logger.info(f"✅ 检测到有效仓库路径: {repo_path} (包含 {len(files)} 个文件)")
+                                break
+                        except Exception as e:
+                            logger.warning(f"检查路径 {path} 失败: {e}")
+                            continue
+
+            if not repo_path:
+                # 如果都找不到，使用第一个作为默认值（让后续逻辑报错）
+                repo_path = possible_paths[0]
+                logger.warning(f"⚠️ 未找到有效仓库路径，使用默认值: {repo_path}")
+        else:
+            repo_path = f"{repo_type}/{owner}/{repo}"
+
+        logger.info(f"📂 最终使用路径: {repo_path}")
+
+        # 创建 DatabaseManager
+        db_manager = DatabaseManager()
+
+        # 获取当前 commit
+        current_commit = get_current_commit(repo_path)
+        logger.info(f"当前 Git commit: {current_commit[:8] if current_commit else 'N/A'}")
+
+        # 准备数据库（这会自动检测变更并增量更新）
+        logger.info("开始准备数据库（自动增量更新）...")
+
+        documents = db_manager.prepare_database(
+            repo_url_or_path=repo_path,
+            repo_type=repo_type
+        )
+
+        logger.info(f"✅ 增量更新完成，共 {len(documents)} 个文档")
+
+        return {
+            "message": "Wiki refreshed successfully (incremental update)",
+            "total_documents": len(documents),
+            "current_commit": current_commit[:8] if current_commit else None,
+            "refresh_type": "incremental"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"增量更新失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to refresh wiki: {str(e)}"
+        )
+
 @app.post("/api/wiki/cleanup")
 async def cleanup_orphan_repositories(
     authorization_code: Optional[str] = Query(None, description="Authorization code")

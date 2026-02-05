@@ -262,6 +262,32 @@ class PgvectorBackend(VectorDBBackend):
             logger.error(f"[pgvector] Failed to get current commit: {e}")
             return None
 
+    def get_last_generated_commit(self) -> Optional[str]:
+        """
+        获取上次生成向量时的 commit hash
+
+        Returns:
+            Optional[str]: commit hash，如果未设置返回 None
+        """
+        if self.repository_id is None:
+            logger.warning("[pgvector] Repository not set. Call use_repository() first.")
+            return None
+
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT last_generated_commit FROM repositories WHERE id = %s",
+                        (self.repository_id,)
+                    )
+                    result = cur.fetchone()
+                    if result and result[0]:
+                        return result[0]
+                    return None
+        except Exception as e:
+            logger.error(f"[pgvector] Failed to get last generated commit: {e}")
+            return None
+
     def update_current_commit(self, commit_hash: str) -> bool:
         """
         更新当前仓库的 commit hash
@@ -282,13 +308,15 @@ class PgvectorBackend(VectorDBBackend):
                     cur.execute(
                         """
                         UPDATE repositories
-                        SET current_commit = %s, updated_at = NOW()
+                        SET current_commit = %s,
+                            last_generated_commit = %s,
+                            updated_at = NOW()
                         WHERE id = %s
                         """,
-                        (commit_hash, self.repository_id)
+                        (commit_hash, commit_hash, self.repository_id)
                     )
                     conn.commit()
-                    logger.info(f"[pgvector] Updated commit to {commit_hash[:8]} for repository_id={self.repository_id}")
+                    logger.info(f"[pgvector] Updated commits: current={commit_hash[:8]}, last_generated={commit_hash[:8]} for repository_id={self.repository_id}")
                     return True
         except Exception as e:
             logger.error(f"[pgvector] Failed to update current commit: {e}")
