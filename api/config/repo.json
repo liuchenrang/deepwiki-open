@@ -10,6 +10,7 @@
       "./jspm_packages/",
       "./.git/", 
       "./vendor/", 
+      "./runtime/", 
       "./test/", 
       "./.svn/", 
       "./.hg/", 
