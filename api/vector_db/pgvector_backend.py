@@ -797,6 +797,27 @@ class PgvectorBackend(VectorDBBackend):
             self.repository_id = None
             logger.info(f"[pgvector] 清空当前 repository_id（因为已删除）")
 
+        # 删除 DashScope 向量缓存文件
+        import os
+        cache_dir = "./embedding_cache"
+        repo_name = f"{owner}_{repo}"
+        if os.path.exists(cache_dir):
+            cache_pattern = f"dashscope_{repo_name}_"
+            deleted_cache_files = []
+
+            for filename in os.listdir(cache_dir):
+                if filename.startswith(cache_pattern) and filename.endswith(".pkl"):
+                    cache_file = os.path.join(cache_dir, filename)
+                    try:
+                        os.remove(cache_file)
+                        deleted_cache_files.append(filename)
+                        logger.info(f"[pgvector] ✅ 删除缓存文件: {cache_file}")
+                    except Exception as e:
+                        logger.warning(f"[pgvector] ⚠️ 删除缓存文件失败 {cache_file}: {e}")
+
+            if deleted_cache_files:
+                logger.info(f"[pgvector] ✅ 删除了 {len(deleted_cache_files)} 个缓存文件")
+
         return True
 
     def clear_repository_documents(self, repository_id: int = None) -> int:
@@ -832,6 +853,37 @@ class PgvectorBackend(VectorDBBackend):
                 )
                 deleted_count = cur.rowcount
                 conn.commit()
+
+                # 获取 owner 和 repo 信息，用于删除缓存文件
+                cur.execute(
+                    "SELECT owner, repo FROM repositories WHERE id = %s",
+                    (repository_id,)
+                )
+                repo_info = cur.fetchone()
+
+                if repo_info:
+                    owner, repo = repo_info
+
+                    # 删除 DashScope 向量缓存文件
+                    import os
+                    cache_dir = "./embedding_cache"
+                    repo_name = f"{owner}_{repo}"
+                    if os.path.exists(cache_dir):
+                        cache_pattern = f"dashscope_{repo_name}_"
+                        deleted_cache_files = []
+
+                        for filename in os.listdir(cache_dir):
+                            if filename.startswith(cache_pattern) and filename.endswith(".pkl"):
+                                cache_file = os.path.join(cache_dir, filename)
+                                try:
+                                    os.remove(cache_file)
+                                    deleted_cache_files.append(filename)
+                                    logger.info(f"[pgvector] ✅ 删除缓存文件: {cache_file}")
+                                except Exception as e:
+                                    logger.warning(f"[pgvector] ⚠️ 删除缓存文件失败 {cache_file}: {e}")
+
+                        if deleted_cache_files:
+                            logger.info(f"[pgvector] ✅ 删除了 {len(deleted_cache_files)} 个缓存文件")
 
         logger.info(f"[pgvector] ✅ 成功删除 {deleted_count} 个文档")
         logger.info("=" * 80)

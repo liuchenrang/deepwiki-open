@@ -597,6 +597,28 @@ async def delete_wiki_cache(
                         os.remove(db_file)
                         logger.info(f"✅ Deleted LocalDB file: {db_file}")
 
+                    # 删除 DashScope 向量缓存文件
+                    cache_dir = "./embedding_cache"
+                    if os.path.exists(cache_dir):
+                        # DashScope 缓存文件命名规则: dashscope_{repo_name}_Embedder_dashscope_embeddings.pkl
+                        cache_pattern = f"dashscope_{repo_name}_"
+                        deleted_cache_files = []
+
+                        for filename in os.listdir(cache_dir):
+                            if filename.startswith(cache_pattern) and filename.endswith(".pkl"):
+                                cache_file = os.path.join(cache_dir, filename)
+                                try:
+                                    os.remove(cache_file)
+                                    deleted_cache_files.append(filename)
+                                    logger.info(f"✅ Deleted DashScope cache file: {cache_file}")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Failed to delete cache file {cache_file}: {e}")
+
+                        if deleted_cache_files:
+                            logger.info(f"✅ Deleted {len(deleted_cache_files)} DashScope cache file(s) for {owner}/{repo}")
+                        else:
+                            logger.debug(f"No DashScope cache files found for {repo_name}")
+
             except ImportError as e:
                 logger.warning(f"Failed to import vector_db module: {e}")
                 db_error = str(e)
