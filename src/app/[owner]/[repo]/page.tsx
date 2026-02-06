@@ -497,7 +497,8 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
 
 6.  **Source Citations (EXTREMELY IMPORTANT):**
     *   For EVERY piece of significant information, explanation, diagram, table entry, or code snippet, you MUST cite the specific source file(s) and relevant line numbers from which the information was derived.
-    *   Place citations at the end of the paragraph, under the diagram/table, or after the code snippet.
+    *   Place citations at the end of the paragraph, **AFTER** the diagram/table code block (NOT inside the \`\`\` block).
+    *   **CRITICAL FOR MERMAID DIAGRAMS**: NEVER place Sources citations inside the \`\`\`mermaid code block. They must be placed AFTER the closing \`\`\` on a separate line.
     *   Use the exact format: \`Sources: [filename.ext:start_line-end_line]()\` for a range, or \`Sources: [filename.ext:line_number]()\` for a single line. Multiple files can be cited: \`Sources: [file1.ext:1-10](), [file2.ext:5](), [dir/file3.ext]()\` (if the whole file is relevant and line numbers are not applicable or too broad).
     *   If an entire section is overwhelmingly based on one or two files, you can cite them under the section heading in addition to more specific citations within the section.
     *   IMPORTANT: You MUST cite AT LEAST 5 different source files throughout the wiki page to ensure comprehensive coverage.
@@ -649,6 +650,14 @@ Remember:
         // Replace 'flowchart' with 'graph' to ensure compatibility with all Mermaid versions
         content = content.replace(/```mermaid\r?\n\s*flowchart/gm, (match) => {
           return match.replace('flowchart', 'graph');
+        });
+
+        // Remove Sources citations from inside Mermaid code blocks
+        // LLM may incorrectly place Sources inside the ```mermaid block, causing syntax errors
+        content = content.replace(/```mermaid\r?\n([\s\S]*?)```/gm, (match, graphCode) => {
+          // Remove Sources lines from inside the code block
+          const cleanedGraph = graphCode.replace(/^\s*Sources:.*$\n?/gm, '');
+          return '```mermaid\n' + cleanedGraph + '```';
         });
 
         console.log(`Received content for ${page.title}, length: ${content.length} characters`);
